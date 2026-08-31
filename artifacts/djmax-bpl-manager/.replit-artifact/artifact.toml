@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "DJMAX BPL Match Manager"
+description = "A two-player DJMAX match setup and round manager for BPL-style play, with DLC ownership checks, official difficulty tiers, genre draws, and strategy card resolution."
+version = "1.0.0"
+id = "artifacts/djmax-bpl-manager"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 18979
+
+[services.development]
+run = "pnpm --filter @workspace/djmax-bpl-manager run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/djmax-bpl-manager", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/djmax-bpl-manager/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "18979"
+BASE_PATH = "/"
