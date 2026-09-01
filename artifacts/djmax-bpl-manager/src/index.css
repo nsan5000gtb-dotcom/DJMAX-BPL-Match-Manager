@@ -560,6 +560,15 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .ownership-line button.owned.p1 { border-color: rgba(80,216,223,.6); color: var(--online-cyan); }
 .ownership-line button.owned.p2 { border-color: rgba(240,117,165,.6); color: var(--online-pink); }
 .ownership-line button.pool { border-color: var(--online-yellow); background: rgba(245,197,76,.12); color: var(--online-yellow); }
+.tier-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 16px; }
+.tier-row button { height: 40px; border: 1px solid #354158; background: #141a2b; color: #8996ab; font: 13px 'DM Mono', monospace; }
+.tier-row button.selected { border-color: var(--online-cyan); background: rgba(80,216,223,.13); color: var(--online-cyan); }
+.tier-card p { margin-top: 12px; }
+.tier-badge { display: inline-block; padding: 1px 5px; margin-right: 5px; border-radius: 3px; font: 10px 'DM Mono', monospace; border: 1px solid #354158; color: #8996ab; }
+.tier-badge.sc { border-color: var(--online-yellow); color: var(--online-yellow); }
+.tier-badge.mx { border-color: var(--online-cyan); color: var(--online-cyan); }
+.tier-badge.hd { border-color: var(--online-pink); color: var(--online-pink); }
+.tier-badge.nm { border-color: #b095ff; color: #b095ff; }
 .data-note { gap: 7px; margin: 28px 0 0; color: #8692a7; font-size: 11px; }
 
 /* Waiting room */

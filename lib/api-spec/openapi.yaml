@@ -189,6 +189,14 @@ components:
         - 高速
         - 混合
         - 未分類
+    Tier:
+      type: string
+      description: DJMAX chart difficulty tier, from hardest to easiest.
+      enum:
+        - SC
+        - MX
+        - HD
+        - NM
     CatalogSong:
       type: object
       properties:
@@ -200,19 +208,25 @@ components:
           type: string
         chart:
           type: string
+        tier:
+          $ref: "#/components/schemas/Tier"
         officialDifficulty:
           type: ["number", "null"]
         unofficialDifficulty:
           type: number
         pack:
           type: string
+          description: Official DLC pack id (e.g. "v-extension-4"). Falls back to the raw V-ARCHIVE pack code when the pack isn't in the known mapping.
+        packLabel:
+          type: string
+          description: Human-readable official DLC pack name (e.g. "V EXTENSION 4").
         chartTags:
           type: array
           items:
             $ref: "#/components/schemas/ChartTag"
         sourceUrl:
           type: string
-      required: [id, title, artist, chart, officialDifficulty, unofficialDifficulty, pack, chartTags, sourceUrl]
+      required: [id, title, artist, chart, tier, officialDifficulty, unofficialDifficulty, pack, packLabel, chartTags, sourceUrl]
     CatalogResponse:
       type: object
       properties:
@@ -259,6 +273,11 @@ components:
         selectedPacks:
           type: array
           items: { type: string }
+        includeTiers:
+          type: array
+          description: Which difficulty tiers to draw songs from. Defaults to SC-only if omitted.
+          items:
+            $ref: "#/components/schemas/Tier"
       required: [playerName, button, centerDifficulty, lowerOffset, upperOffset, p1Owned, p2Owned, selectedPacks]
     SessionJoinInput:
       type: object
@@ -309,6 +328,10 @@ components:
         selectedPacks:
           type: array
           items: { type: string }
+        includeTiers:
+          type: array
+          items:
+            $ref: "#/components/schemas/Tier"
         selectedTag:
           $ref: "#/components/schemas/ChartTag"
         songId:
@@ -381,6 +404,10 @@ components:
         selectedPacks:
           type: array
           items: { type: string }
+        includeTiers:
+          type: array
+          items:
+            $ref: "#/components/schemas/Tier"
         currentRound:
           type: number
         rounds:
@@ -389,5 +416,5 @@ components:
             $ref: "#/components/schemas/SessionRound"
         updatedAt:
           type: string
-      required: [key, clientToken, role, status, p1, p2, button, centerDifficulty, lowerOffset, upperOffset, p1Owned, p2Owned, selectedPacks, currentRound, rounds, updatedAt]
+      required: [key, clientToken, role, status, p1, p2, button, centerDifficulty, lowerOffset, upperOffset, p1Owned, p2Owned, selectedPacks, includeTiers, currentRound, rounds, updatedAt]
 

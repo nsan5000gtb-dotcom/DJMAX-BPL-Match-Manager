@@ -9,6 +9,42 @@ import {
 } from "@workspace/api-zod";
 import { db, matchSessionsTable } from "@workspace/db";
 
+// Difficulty tiers from hardest to easiest. V-ARCHIVE's 서열표 (ranking table)
+// covers all four; MAX DJ POWER (the old endpoint) only covered SC.
+type Tier = "SC" | "MX" | "HD" | "NM";
+const ALL_TIERS: Tier[] = ["SC", "MX", "HD", "NM"];
+const DEFAULT_TIERS: Tier[] = ["SC"];
+
+// Official DJMAX RESPECT V DLC pack codes, as used on V-ARCHIVE's 서열표.
+// Codes we haven't confirmed (mostly one-off collaboration packs) fall back
+// to their raw V-ARCHIVE code so nothing is silently dropped or mislabeled.
+const DLC_PACKS: Record<string, { id: string; label: string }> = {
+  R: { id: "respect", label: "RESPECT（本体収録）" },
+  VE: { id: "v-extension-1", label: "V EXTENSION" },
+  VE2: { id: "v-extension-2", label: "V EXTENSION 2" },
+  VE3: { id: "v-extension-3", label: "V EXTENSION 3" },
+  VE4: { id: "v-extension-4", label: "V EXTENSION 4" },
+  VE5: { id: "v-extension-5", label: "V EXTENSION 5" },
+  VL: { id: "v-liberty-1", label: "V LIBERTY" },
+  VL2: { id: "v-liberty-2", label: "V LIBERTY 2" },
+  VL3: { id: "v-liberty-3", label: "V LIBERTY 3" },
+  VL4: { id: "v-liberty-4", label: "V LIBERTY 4" },
+  VL5: { id: "v-liberty-5", label: "V LIBERTY 5" },
+  T1: { id: "technika-1", label: "TECHNIKA" },
+  T2: { id: "technika-2", label: "TECHNIKA 2" },
+  T3: { id: "technika-3", label: "TECHNIKA 3" },
+  BS: { id: "black-square", label: "BLACK SQUARE" },
+  P3: { id: "portable-3", label: "PORTABLE 3" },
+};
+
+function resolvePack(rawCode: string): { pack: string; packLabel: string } {
+  const known = DLC_PACKS[rawCode];
+  if (known) return { pack: known.id, packLabel: known.label };
+  // Unknown / unmapped code (mostly one-off collab packs): keep the raw
+  // V-ARCHIVE code so songs still group together instead of disappearing.
+  return { pack: rawCode || "unknown", packLabel: rawCode || "その他コラボ" };
+}
+
 type ChartTag =
   | "物量"
   | "ハネリズム"
@@ -26,9 +62,11 @@ type CatalogSong = {
   title: string;
   artist: string;
   chart: string;
+  tier: Tier;
   officialDifficulty: number | null;
   unofficialDifficulty: number;
   pack: string;
+  packLabel: string;
   chartTags: ChartTag[];
   sourceUrl: string;
 };
@@ -64,6 +102,7 @@ type InternalSession = {
   p1Owned: string[];
   p2Owned: string[];
   selectedPacks: string[];
+  includeTiers: Tier[];
   currentRound: number;
   rounds: RoundState[];
   updatedAt: string;
@@ -84,36 +123,54 @@ const chartTags: ChartTag[] = [
 ];
 const catalogCache = new Map<number, { songs: CatalogSong[]; source: "v-archive" | "fallback"; fetchedAt: string }>();
 
-const fallbackSongs: CatalogSong[] = [
-  ["733", "#1f1e33", "ARC", 15.2, "V-ARCHIVE", ["階段", "乱打"]],
-  ["654", "1! 2! 3! 4! Streaming rn CHU!", "VL2", 15.2, "V-ARCHIVE", ["同時押し", "ハネリズム"]],
-  ["553", "DIE IN", "VE4", 16.1, "V-ARCHIVE", ["物量", "高速"]],
-  ["756", "Heliocentrism", "VL4", 15.3, "V-ARCHIVE", ["階段", "高速"]],
-  ["544", "LIMBO", "EZ2", 15.2, "V-ARCHIVE", ["低速", "混合"]],
-  ["81", "Nightmare", "P2", 15.3, "V-ARCHIVE", ["物量", "乱打"]],
-  ["476", "PUPA", "MD", 15.2, "V-ARCHIVE", ["乱打", "高速"]],
-  ["722", "PUPA (xi Remix)", "RV", 15.2, "V-ARCHIVE", ["乱打", "トリル"]],
-  ["713", "Rise Up", "VL3", 15.2, "V-ARCHIVE", ["物量", "同時押し"]],
-  ["767", "The Castle of Báthory", "VL4", 15.2, "V-ARCHIVE", ["低速", "階段"]],
-  ["524", "Zero-Break", "VE3", 15.3, "V-ARCHIVE", ["物量", "ハネリズム"]],
-  ["545", "Zeroize", "EZ2", 15.2, "V-ARCHIVE", ["トリル", "高速"]],
-  ["783", "And Revive The Melody", "OGK", 15.2, "V-ARCHIVE", ["ハネリズム", "同時押し"]],
-  ["789", "LAMIA", "OGK", 15.3, "V-ARCHIVE", ["物量", "高速"]],
-  ["794", "MEGATØNiX PHANTØM", "CP", 15.2, "V-ARCHIVE", ["乱打", "混合"]],
-  ["815", "Megingjord", "VL5", 15.2, "V-ARCHIVE", ["物量", "階段"]],
-  ["807", "RE;DIEIN", "VL5", 15.2, "V-ARCHIVE", ["乱打", "高速"]],
-  ["810", "Sleipnir", "VL5", 15.2, "V-ARCHIVE", ["トリル", "高速"]],
-].map(([id, title, chart, level, pack, tags]) => ({
-  id: String(id),
-  title: String(title),
-  artist: "V-ARCHIVE",
-  chart: String(chart),
-  officialDifficulty: null,
-  unofficialDifficulty: Number(level),
-  pack: String(pack),
-  chartTags: tags as ChartTag[],
-  sourceUrl: `https://v-archive.net/db/title/${id}`,
-}));
+// [id, title, packCode, tier, level, tags] — packCode/tier/level are sourced
+// from V-ARCHIVE's 서열표 (grade table) so the offline fallback still reflects
+// real official DLC packs and includes MX-tier (not just SC-tier) charts.
+const fallbackSongs: CatalogSong[] = (
+  [
+    ["733", "#1f1e33", "ARC", "SC", 15.2, ["階段", "乱打"]],
+    ["654", "1! 2! 3! 4! Streaming rn CHU!", "VL2", "SC", 15.2, ["同時押し", "ハネリズム"]],
+    ["553", "DIE IN", "VE4", "SC", 16.1, ["物量", "高速"]],
+    ["553", "DIE IN", "VE4", "MX", 15.2, ["物量", "高速"]],
+    ["756", "Heliocentrism", "VL4", "SC", 15.3, ["階段", "高速"]],
+    ["544", "LIMBO", "EZ2", "SC", 15.2, ["低速", "混合"]],
+    ["544", "LIMBO", "EZ2", "MX", 14.2, ["低速", "混合"]],
+    ["81", "Nightmare", "P2", "SC", 15.3, ["物量", "乱打"]],
+    ["476", "PUPA", "MD", "SC", 15.2, ["乱打", "高速"]],
+    ["476", "PUPA", "MD", "MX", 15.1, ["乱打", "高速"]],
+    ["722", "PUPA (xi Remix)", "RV", "SC", 15.2, ["乱打", "トリル"]],
+    ["713", "Rise Up", "VL3", "SC", 15.2, ["物量", "同時押し"]],
+    ["767", "The Castle of Báthory", "VL4", "SC", 15.2, ["低速", "階段"]],
+    ["767", "The Castle of Báthory", "VL4", "MX", 15.1, ["低速", "階段"]],
+    ["524", "Zero-Break", "VE3", "SC", 15.3, ["物量", "ハネリズム"]],
+    ["545", "Zeroize", "EZ2", "SC", 15.2, ["トリル", "高速"]],
+    ["545", "Zeroize", "EZ2", "MX", 14.1, ["トリル", "高速"]],
+    ["783", "And Revive The Melody", "OGK", "SC", 15.2, ["ハネリズム", "同時押し"]],
+    ["789", "LAMIA", "OGK", "SC", 15.3, ["物量", "高速"]],
+    ["789", "LAMIA", "OGK", "MX", 15.1, ["物量", "高速"]],
+    ["794", "MEGATØNiX PHANTØM", "CP", "SC", 15.2, ["乱打", "混合"]],
+    ["815", "Megingjord", "VL5", "SC", 15.2, ["物量", "階段"]],
+    ["815", "Megingjord", "VL5", "MX", 15.1, ["物量", "階段"]],
+    ["807", "RE;DIEIN", "VL5", "SC", 15.2, ["乱打", "高速"]],
+    ["810", "Sleipnir", "VL5", "SC", 15.2, ["トリル", "高速"]],
+    ["810", "Sleipnir", "VL5", "MX", 15.2, ["トリル", "高速"]],
+  ] as const
+).map(([id, title, packCode, tier, level, tags]) => {
+  const { pack, packLabel } = resolvePack(packCode);
+  return {
+    id: `${id}-${tier}`,
+    title: String(title),
+    artist: "V-ARCHIVE",
+    chart: packCode,
+    tier: tier as Tier,
+    officialDifficulty: null,
+    unofficialDifficulty: Number(level),
+    pack,
+    packLabel,
+    chartTags: tags as unknown as ChartTag[],
+    sourceUrl: `https://v-archive.net/db/title/${id}`,
+  };
+});
 
 function makeKey() {
   let key = "";
@@ -204,6 +261,7 @@ function responseFor(session: InternalSession, token: string | undefined) {
     p1Owned: session.p1Owned,
     p2Owned: session.p2Owned,
     selectedPacks: session.selectedPacks,
+    includeTiers: session.includeTiers?.length ? session.includeTiers : DEFAULT_TIERS,
     currentRound: session.currentRound,
     rounds: session.rounds.map((round) => ({
       label: round.label,
@@ -273,8 +331,11 @@ function guessTags(title: string): ChartTag[] {
   return ["未分類"];
 }
 
+// V-ARCHIVE's MAX DJ POWER page (djpower) only lists SC-tier charts. The
+// 서열표 (grade / ranking table) page covers SC/MX/HD/NM for every level, and
+// also prints each song's DLC pack code, so we use that instead.
 async function fetchVArchive(button: 4 | 5 | 6 | 8) {
-  const sourceUrl = `https://v-archive.net/djpower/${button}`;
+  const sourceUrl = `https://v-archive.net/grade/${button}/ALL`;
   try {
     const response = await fetch(sourceUrl, { signal: AbortSignal.timeout(8000) });
     if (!response.ok) throw new Error(`V-ARCHIVE returned ${response.status}`);
@@ -282,21 +343,34 @@ async function fetchVArchive(button: 4 | 5 | 6 | 8) {
     const songs: CatalogSong[] = [];
     const songPattern = /href=["']\/db\/title\/(\d+)["'][^>]*>([^<]+)<\/a>/g;
     let match: RegExpExecArray | null;
-    while ((match = songPattern.exec(html)) !== null && songs.length < 800) {
+    while ((match = songPattern.exec(html)) !== null && songs.length < 2000) {
       const id = match[1];
       const title = normalizeTitle(match[2].replace(/&amp;/g, "&"));
-      const context = html.slice(Math.max(0, match.index - 8000), match.index);
+      // Best-effort: look at the markup immediately around each song link for
+      // its tier (SC/MX/HD/NM), level, and DLC pack code. V-ARCHIVE doesn't
+      // publish a stable API for this, so if their markup changes this may
+      // need retuning — it always falls back to the offline catalog below.
+      const context = html.slice(Math.max(0, match.index - 400), match.index);
       const levelMatches = [...context.matchAll(/<h4[^>]*>\s*(\d+(?:\.\d+)?)\s*<\/h4>/gi)];
       const level = levelMatches.length ? Number(levelMatches[levelMatches.length - 1][1]) : null;
-      if (level === null || songs.some((song) => song.id === id && song.unofficialDifficulty === level)) continue;
+      const tierMatches = [...context.matchAll(/\b(SC|MX|HD|NM)\b/g)];
+      const tier = (tierMatches.length ? tierMatches[tierMatches.length - 1][1] : "SC") as Tier;
+      const packMatches = [...context.matchAll(/>\s*([A-Z]{1,4}[0-9]?)\s*<\/[a-z]+>\s*(?:<[^>]+>\s*)*$/gi)];
+      const packCode = packMatches.length ? packMatches[packMatches.length - 1][1] : "R";
+      if (level === null) continue;
+      const dedupeKey = `${id}-${tier}`;
+      if (songs.some((song) => song.id === dedupeKey)) continue;
+      const { pack, packLabel } = resolvePack(packCode);
       songs.push({
-        id: `${button}b-${id}-${level}`,
+        id: dedupeKey,
         title,
         artist: "V-ARCHIVE",
         chart: `${button}B`,
+        tier,
         officialDifficulty: null,
         unofficialDifficulty: level,
-        pack: "V-ARCHIVE",
+        pack,
+        packLabel,
         chartTags: guessTags(title),
         sourceUrl: `https://v-archive.net/db/title/${id}`,
       });
@@ -320,8 +394,10 @@ function availableSongs(session: InternalSession, catalog: CatalogSong[]) {
   const current = session.rounds[session.currentRound];
   if (!current) return [];
   const selected = new Set(session.selectedPacks);
+  const tiers = new Set(session.includeTiers?.length ? session.includeTiers : DEFAULT_TIERS);
   return catalog.filter(
     (song) =>
+      tiers.has(song.tier) &&
       (selected.size === 0 || selected.has(song.pack)) &&
       session.p1Owned.includes(song.pack) &&
       session.p2Owned.includes(song.pack) &&
@@ -338,10 +414,7 @@ router.get("/catalog/:button", async (req, res) => {
     return;
   }
   const catalog = await getCatalog(parsed.data.button);
-  res.json({
-    ...catalog,
-    sourceUrl: `https://v-archive.net/djpower/${parsed.data.button}`,
-  });
+  res.json(catalog);
 });
 
 router.post("/sessions", async (req, res) => {
@@ -365,6 +438,7 @@ router.post("/sessions", async (req, res) => {
     p1Owned: input.p1Owned,
     p2Owned: input.p2Owned,
     selectedPacks: input.selectedPacks,
+    includeTiers: (input.includeTiers?.length ? input.includeTiers : DEFAULT_TIERS) as Tier[],
     currentRound: 0,
     rounds: roundRange(input.centerDifficulty, input.lowerOffset, input.upperOffset),
     updatedAt: new Date().toISOString(),
@@ -441,6 +515,7 @@ router.post("/sessions/:key/actions", async (req, res) => {
     if (input.p1Owned) session.p1Owned = input.p1Owned;
     if (input.p2Owned) session.p2Owned = input.p2Owned;
     if (input.selectedPacks) session.selectedPacks = input.selectedPacks;
+    if (input.includeTiers?.length) session.includeTiers = input.includeTiers as Tier[];
     session.rounds = roundRange(session.centerDifficulty, session.lowerOffset, session.upperOffset);
   } else if (input.action === "start-match") {
     if (!session.p2) {
