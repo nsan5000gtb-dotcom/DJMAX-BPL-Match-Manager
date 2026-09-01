@@ -92,8 +92,12 @@ export const CreateMatchSessionResponse = zod.object({
   "p1Card": zod.boolean(),
   "p2Card": zod.boolean(),
   "resolved": zod.boolean(),
-  "pickedSongId": zod.string().nullable(),
-  "pickedSongTitle": zod.string().nullable()
+  "mySongId": zod.string().nullable(),
+  "mySongTitle": zod.string().nullable(),
+  "opponentSongTitle": zod.string().nullable(),
+  "revealed": zod.boolean(),
+  "strategyOutcome": zod.enum(['none', 'random', 'cancelled']),
+  "strategyEventId": zod.string().nullable()
 })),
   "updatedAt": zod.string()
 })
@@ -134,8 +138,12 @@ export const GetMatchSessionResponse = zod.object({
   "p1Card": zod.boolean(),
   "p2Card": zod.boolean(),
   "resolved": zod.boolean(),
-  "pickedSongId": zod.string().nullable(),
-  "pickedSongTitle": zod.string().nullable()
+  "mySongId": zod.string().nullable(),
+  "mySongTitle": zod.string().nullable(),
+  "opponentSongTitle": zod.string().nullable(),
+  "revealed": zod.boolean(),
+  "strategyOutcome": zod.enum(['none', 'random', 'cancelled']),
+  "strategyEventId": zod.string().nullable()
 })),
   "updatedAt": zod.string()
 })
@@ -184,8 +192,12 @@ export const JoinMatchSessionResponse = zod.object({
   "p1Card": zod.boolean(),
   "p2Card": zod.boolean(),
   "resolved": zod.boolean(),
-  "pickedSongId": zod.string().nullable(),
-  "pickedSongTitle": zod.string().nullable()
+  "mySongId": zod.string().nullable(),
+  "mySongTitle": zod.string().nullable(),
+  "opponentSongTitle": zod.string().nullable(),
+  "revealed": zod.boolean(),
+  "strategyOutcome": zod.enum(['none', 'random', 'cancelled']),
+  "strategyEventId": zod.string().nullable()
 })),
   "updatedAt": zod.string()
 })
@@ -250,8 +262,12 @@ export const ApplyMatchActionResponse = zod.object({
   "p1Card": zod.boolean(),
   "p2Card": zod.boolean(),
   "resolved": zod.boolean(),
-  "pickedSongId": zod.string().nullable(),
-  "pickedSongTitle": zod.string().nullable()
+  "mySongId": zod.string().nullable(),
+  "mySongTitle": zod.string().nullable(),
+  "opponentSongTitle": zod.string().nullable(),
+  "revealed": zod.boolean(),
+  "strategyOutcome": zod.enum(['none', 'random', 'cancelled']),
+  "strategyEventId": zod.string().nullable()
 })),
   "updatedAt": zod.string()
 })

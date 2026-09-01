@@ -41,8 +41,13 @@ type RoundState = {
   p1Card: boolean;
   p2Card: boolean;
   resolved: boolean;
-  pickedSongId: string | null;
-  pickedSongTitle: string | null;
+  p1SongId: string | null;
+  p1SongTitle: string | null;
+  p2SongId: string | null;
+  p2SongTitle: string | null;
+  revealed: boolean;
+  strategyOutcome: "none" | "random" | "cancelled";
+  strategyEventId: string | null;
 };
 
 type InternalSession = {
@@ -134,8 +139,13 @@ function roundRange(center: number, lowerOffset: number, upperOffset: number): R
       p1Card: false,
       p2Card: false,
       resolved: false,
-      pickedSongId: null,
-      pickedSongTitle: null,
+      p1SongId: null,
+      p1SongTitle: null,
+      p2SongId: null,
+      p2SongTitle: null,
+      revealed: false,
+      strategyOutcome: "none",
+      strategyEventId: null,
     },
     {
       label: "MID",
@@ -145,8 +155,13 @@ function roundRange(center: number, lowerOffset: number, upperOffset: number): R
       p1Card: false,
       p2Card: false,
       resolved: false,
-      pickedSongId: null,
-      pickedSongTitle: null,
+      p1SongId: null,
+      p1SongTitle: null,
+      p2SongId: null,
+      p2SongTitle: null,
+      revealed: false,
+      strategyOutcome: "none",
+      strategyEventId: null,
     },
     {
       label: "HIGH",
@@ -156,8 +171,13 @@ function roundRange(center: number, lowerOffset: number, upperOffset: number): R
       p1Card: false,
       p2Card: false,
       resolved: false,
-      pickedSongId: null,
-      pickedSongTitle: null,
+      p1SongId: null,
+      p1SongTitle: null,
+      p2SongId: null,
+      p2SongTitle: null,
+      revealed: false,
+      strategyOutcome: "none",
+      strategyEventId: null,
     },
   ];
 }
@@ -169,9 +189,11 @@ function roleFor(session: InternalSession, token: string | undefined) {
 }
 
 function responseFor(session: InternalSession, token: string | undefined) {
+  const role = roleFor(session, token);
+  const player = role === "guest" ? "p2" : role === "host" ? "p1" : null;
   return {
     key: session.key,
-    role: roleFor(session, token),
+    role,
     status: session.status,
     p1: session.p1,
     p2: session.p2,
@@ -183,7 +205,27 @@ function responseFor(session: InternalSession, token: string | undefined) {
     p2Owned: session.p2Owned,
     selectedPacks: session.selectedPacks,
     currentRound: session.currentRound,
-    rounds: session.rounds,
+    rounds: session.rounds.map((round) => ({
+      label: round.label,
+      lower: round.lower,
+      upper: round.upper,
+      tag: round.tag,
+      p1Card: round.p1Card,
+      p2Card: round.p2Card,
+      resolved: round.resolved,
+      mySongId: player === "p1" ? round.p1SongId : player === "p2" ? round.p2SongId : null,
+      mySongTitle: player === "p1" ? round.p1SongTitle : player === "p2" ? round.p2SongTitle : null,
+      opponentSongTitle: round.revealed
+        ? player === "p1"
+          ? round.p2SongTitle
+          : player === "p2"
+            ? round.p1SongTitle
+            : null
+        : null,
+      revealed: round.revealed,
+      strategyOutcome: round.strategyOutcome,
+      strategyEventId: round.strategyEventId,
+    })),
     updatedAt: session.updatedAt,
     clientToken: token === session.guestToken
       ? session.guestToken
@@ -413,40 +455,83 @@ router.post("/sessions/:key/actions", async (req, res) => {
     current.tag = input.selectedTag ?? choices[Math.floor(Math.random() * choices.length)] ?? chartTags[0];
   } else if (input.action === "use-strategy") {
     const current = session.rounds[session.currentRound];
+    if (current.resolved || current.revealed) {
+      res.status(400).json({ error: "このラウンドのカード処理は完了しています" });
+      return;
+    }
+    if ((actor === "p1" && current.p1Card) || (actor === "p2" && current.p2Card)) {
+      res.status(400).json({ error: "ストラテジーはすでに使用済みです" });
+      return;
+    }
     if (actor === "p1") current.p1Card = true;
     if (actor === "p2") current.p2Card = true;
+    current.strategyEventId = makeToken();
     if (current.p1Card && current.p2Card) {
-      current.pickedSongId = null;
-      current.pickedSongTitle = null;
+      current.p1SongId = null;
+      current.p1SongTitle = null;
+      current.p2SongId = null;
+      current.p2SongTitle = null;
+      current.revealed = false;
+      current.strategyOutcome = "cancelled";
       current.resolved = false;
     } else {
       const catalog = await getCatalog(session.button);
       const songs = availableSongs(session, catalog.songs);
       const picked = songs[Math.floor(Math.random() * songs.length)];
       if (picked) {
-        current.pickedSongId = picked.id;
-        current.pickedSongTitle = picked.title;
+        if (actor === "p1") {
+          current.p1SongId = picked.id;
+          current.p1SongTitle = picked.title;
+        } else {
+          current.p2SongId = picked.id;
+          current.p2SongTitle = picked.title;
+        }
       }
+      current.strategyOutcome = "random";
+      current.revealed = Boolean(current.p1SongId && current.p2SongId);
       current.resolved = false;
     }
   } else if (input.action === "resolve-strategy") {
     const current = session.rounds[session.currentRound];
     if (current.p1Card && current.p2Card) {
-      current.pickedSongId = null;
-      current.pickedSongTitle = null;
+      current.p1Card = false;
+      current.p2Card = false;
+      current.strategyEventId = makeToken();
+      current.strategyOutcome = "cancelled";
+      current.revealed = false;
     }
     current.resolved = true;
   } else if (input.action === "pick-song") {
     const current = session.rounds[session.currentRound];
+    if (current.revealed) {
+      res.status(400).json({ error: "選曲公開後は変更できません" });
+      return;
+    }
+    if ((actor === "p1" && current.p1Card) || (actor === "p2" && current.p2Card)) {
+      res.status(400).json({ error: "ストラテジー使用中は手動選曲できません" });
+      return;
+    }
     const catalog = await getCatalog(session.button);
     const picked = availableSongs(session, catalog.songs).find((song) => song.id === input.songId);
     if (!picked) {
       res.status(400).json({ error: "その曲は現在のカタログにありません" });
       return;
     }
-    current.pickedSongId = picked.id;
-    current.pickedSongTitle = picked.title;
+    if (actor === "p1") {
+      current.p1SongId = picked.id;
+      current.p1SongTitle = picked.title;
+    } else {
+      current.p2SongId = picked.id;
+      current.p2SongTitle = picked.title;
+    }
+    current.revealed = Boolean(current.p1SongId && current.p2SongId);
+    current.resolved = false;
   } else if (input.action === "advance-round") {
+    const current = session.rounds[session.currentRound];
+    if (!current?.revealed) {
+      res.status(400).json({ error: "両者が選曲を終えるまで次へ進めません" });
+      return;
+    }
     if (session.currentRound >= session.rounds.length - 1) {
       session.status = "finished";
     } else {

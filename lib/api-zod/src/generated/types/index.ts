@@ -20,6 +20,7 @@ export * from './sessionCreateInput';
 export * from './sessionCreateInputButton';
 export * from './sessionJoinInput';
 export * from './sessionRound';
+export * from './sessionRoundStrategyOutcome';
 export * from './sessionState';
 export * from './sessionStateRole';
 export * from './sessionStateStatus';

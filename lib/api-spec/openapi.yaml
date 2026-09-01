@@ -333,11 +333,20 @@ components:
           type: boolean
         resolved:
           type: boolean
-        pickedSongId:
+        mySongId:
           type: ["string", "null"]
-        pickedSongTitle:
+        mySongTitle:
           type: ["string", "null"]
-      required: [label, lower, upper, tag, p1Card, p2Card, resolved, pickedSongId, pickedSongTitle]
+        opponentSongTitle:
+          type: ["string", "null"]
+        revealed:
+          type: boolean
+        strategyOutcome:
+          type: string
+          enum: [none, random, cancelled]
+        strategyEventId:
+          type: ["string", "null"]
+      required: [label, lower, upper, tag, p1Card, p2Card, resolved, mySongId, mySongTitle, opponentSongTitle, revealed, strategyOutcome, strategyEventId]
     SessionState:
       type: object
       properties:

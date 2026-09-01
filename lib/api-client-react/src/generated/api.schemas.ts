@@ -160,6 +160,15 @@ export interface SessionActionInput {
   songId?: string;
 }
 
+export type SessionRoundStrategyOutcome = typeof SessionRoundStrategyOutcome[keyof typeof SessionRoundStrategyOutcome];
+
+
+export const SessionRoundStrategyOutcome = {
+  none: 'none',
+  random: 'random',
+  cancelled: 'cancelled',
+} as const;
+
 export interface SessionRound {
   label: string;
   lower: number;
@@ -169,9 +178,15 @@ export interface SessionRound {
   p2Card: boolean;
   resolved: boolean;
   /** @nullable */
-  pickedSongId: string | null;
+  mySongId: string | null;
   /** @nullable */
-  pickedSongTitle: string | null;
+  mySongTitle: string | null;
+  /** @nullable */
+  opponentSongTitle: string | null;
+  revealed: boolean;
+  strategyOutcome: SessionRoundStrategyOutcome;
+  /** @nullable */
+  strategyEventId: string | null;
 }
 
 export type SessionStateRole = typeof SessionStateRole[keyof typeof SessionStateRole];

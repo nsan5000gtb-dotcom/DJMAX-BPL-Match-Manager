@@ -661,6 +661,34 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .protocol-row:last-child { border: 0; }
 .protocol-row strong { color: var(--online-ink); font: 11px 'DM Mono', monospace; }
 .next-round { width: 100%; min-height: 50px; margin-top: 14px; background: var(--online-yellow); color: #1b1e29; font-size: 12px; font-weight: 800; }
+.selection-reveal { position: relative; margin-top: 16px; padding: 20px 22px; border: 1px solid rgba(137,155,190,.2); background: rgba(17, 23, 39, .92); }
+.selection-reveal.revealed { border-color: rgba(245,197,76,.7); background: linear-gradient(120deg, rgba(68, 57, 31, .5), rgba(24, 31, 49, .9)); }
+.selection-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.selection-heading h2 { margin: 7px 0 0; font-size: 17px; }
+.reveal-badge { display: inline-flex; align-items: center; gap: 5px; color: #8190a7; font: 9px 'DM Mono', monospace; letter-spacing: .08em; }
+.revealed .reveal-badge { color: var(--online-yellow); }
+.blind-status { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 19px; }
+.blind-status > div { display: grid; grid-template-columns: 25px 1fr; grid-template-rows: auto auto; column-gap: 8px; align-items: center; padding: 10px; border: 1px solid var(--online-line); }
+.blind-status .status-mark { grid-row: 1 / 3; display: grid; place-items: center; width: 25px; height: 25px; }
+.status-mark.mine { background: rgba(80,216,223,.15); color: var(--online-cyan); }
+.status-mark.waiting { background: rgba(137,155,190,.1); color: #78859b; }
+.blind-status b { color: #8d9ab0; font-size: 10px; }
+.blind-status strong { min-width: 0; overflow: hidden; color: var(--online-ink); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.blind-status > div:last-child strong { color: #75829a; font-weight: 500; }
+.revealed-songs { display: grid; grid-template-columns: 1fr 35px 1fr; align-items: center; gap: 10px; margin-top: 20px; }
+.revealed-songs > div { min-height: 55px; padding: 10px 12px; border-left: 2px solid var(--online-cyan); background: rgba(80,216,223,.08); }
+.revealed-songs > div:last-child { border-left-color: var(--online-pink); background: rgba(240,117,165,.08); }
+.revealed-songs small, .revealed-songs strong { display: block; }
+.revealed-songs small { color: #8190a7; font: 9px 'DM Mono', monospace; }
+.revealed-songs strong { margin-top: 6px; font-size: 12px; }
+.revealed-songs > span { color: var(--online-yellow); font: 10px 'DM Mono', monospace; text-align: center; }
+.strategy-overlay { position: fixed; z-index: 8; inset: 0; display: grid; place-items: center; pointer-events: none; background: rgba(7, 10, 18, .24); animation: overlay-in 1.2s ease both; }
+.strategy-burst { display: grid; justify-items: center; gap: 9px; min-width: min(360px, 82vw); padding: 31px 35px; border: 1px solid var(--online-yellow); background: linear-gradient(145deg, #28354b, #171d31); color: var(--online-ink); box-shadow: 0 0 0 8px rgba(245,197,76,.08), 0 0 55px rgba(245,197,76,.34); text-align: center; animation: burst-in .55s cubic-bezier(.2,.8,.2,1) both; }
+.strategy-burst svg { color: var(--online-yellow); filter: drop-shadow(0 0 9px var(--online-yellow)); }
+.strategy-burst strong { color: var(--online-yellow); font: 800 25px 'Barlow Condensed', sans-serif; letter-spacing: .08em; }
+.strategy-burst span { color: #b2bdce; font-size: 11px; }
+@keyframes overlay-in { 0%, 100% { opacity: 0; } 15%, 75% { opacity: 1; } }
+@keyframes burst-in { 0% { opacity: 0; transform: scale(.72) rotate(-2deg); } 35% { transform: scale(1.04) rotate(0); } 100% { opacity: 1; transform: scale(1); } }
 
 @media (max-width: 980px) {
   .lobby-layout, .room-shell, .match-grid { grid-template-columns: 1fr; }
@@ -707,6 +735,9 @@ button:disabled { cursor: not-allowed; opacity: .42; }
   .match-grid { padding: 0 20px 45px; }
   .tag-draw { display: block; padding: 23px 20px; }
   .tag-draw button { width: 100%; margin-top: 20px; }
+  .blind-status { grid-template-columns: 1fr; }
+  .revealed-songs { grid-template-columns: 1fr; gap: 5px; }
+  .revealed-songs > span { padding: 4px; }
   .song-entry { grid-template-columns: 25px minmax(0, 1fr) 45px; gap: 7px; }
   .tag-list { grid-column: 2; }
   .unofficial-level { grid-column: 3; grid-row: 1; }

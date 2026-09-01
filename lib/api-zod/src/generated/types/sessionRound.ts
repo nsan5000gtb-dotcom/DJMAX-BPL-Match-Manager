@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { ChartTag } from './chartTag';
+import type { SessionRoundStrategyOutcome } from './sessionRoundStrategyOutcome';
 
 export interface SessionRound {
   label: string;
@@ -16,7 +17,13 @@ export interface SessionRound {
   p2Card: boolean;
   resolved: boolean;
   /** @nullable */
-  pickedSongId: string | null;
+  mySongId: string | null;
   /** @nullable */
-  pickedSongTitle: string | null;
+  mySongTitle: string | null;
+  /** @nullable */
+  opponentSongTitle: string | null;
+  revealed: boolean;
+  strategyOutcome: SessionRoundStrategyOutcome;
+  /** @nullable */
+  strategyEventId: string | null;
 }
