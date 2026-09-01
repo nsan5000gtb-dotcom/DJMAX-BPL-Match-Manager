@@ -1,0 +1,1152 @@
+diff --git a/artifacts/api-server/src/routes/matches.ts b/artifacts/api-server/src/routes/matches.ts
+index 30df776..f27db46 100644
+--- a/artifacts/api-server/src/routes/matches.ts
++++ b/artifacts/api-server/src/routes/matches.ts
+@@ -9,6 +9,42 @@ import {
+ } from "@workspace/api-zod";
+ import { db, matchSessionsTable } from "@workspace/db";
+ 
++// Difficulty tiers from hardest to easiest. V-ARCHIVE's 서열표 (ranking table)
++// covers all four; MAX DJ POWER (the old endpoint) only covered SC.
++type Tier = "SC" | "MX" | "HD" | "NM";
++const ALL_TIERS: Tier[] = ["SC", "MX", "HD", "NM"];
++const DEFAULT_TIERS: Tier[] = ["SC"];
++
++// Official DJMAX RESPECT V DLC pack codes, as used on V-ARCHIVE's 서열표.
++// Codes we haven't confirmed (mostly one-off collaboration packs) fall back
++// to their raw V-ARCHIVE code so nothing is silently dropped or mislabeled.
++const DLC_PACKS: Record<string, { id: string; label: string }> = {
++  R: { id: "respect", label: "RESPECT（本体収録）" },
++  VE: { id: "v-extension-1", label: "V EXTENSION" },
++  VE2: { id: "v-extension-2", label: "V EXTENSION 2" },
++  VE3: { id: "v-extension-3", label: "V EXTENSION 3" },
++  VE4: { id: "v-extension-4", label: "V EXTENSION 4" },
++  VE5: { id: "v-extension-5", label: "V EXTENSION 5" },
++  VL: { id: "v-liberty-1", label: "V LIBERTY" },
++  VL2: { id: "v-liberty-2", label: "V LIBERTY 2" },
++  VL3: { id: "v-liberty-3", label: "V LIBERTY 3" },
++  VL4: { id: "v-liberty-4", label: "V LIBERTY 4" },
++  VL5: { id: "v-liberty-5", label: "V LIBERTY 5" },
++  T1: { id: "technika-1", label: "TECHNIKA" },
++  T2: { id: "technika-2", label: "TECHNIKA 2" },
++  T3: { id: "technika-3", label: "TECHNIKA 3" },
++  BS: { id: "black-square", label: "BLACK SQUARE" },
++  P3: { id: "portable-3", label: "PORTABLE 3" },
++};
++
++function resolvePack(rawCode: string): { pack: string; packLabel: string } {
++  const known = DLC_PACKS[rawCode];
++  if (known) return { pack: known.id, packLabel: known.label };
++  // Unknown / unmapped code (mostly one-off collab packs): keep the raw
++  // V-ARCHIVE code so songs still group together instead of disappearing.
++  return { pack: rawCode || "unknown", packLabel: rawCode || "その他コラボ" };
++}
++
+ type ChartTag =
+   | "物量"
+   | "ハネリズム"
+@@ -26,9 +62,11 @@ type CatalogSong = {
+   title: string;
+   artist: string;
+   chart: string;
++  tier: Tier;
+   officialDifficulty: number | null;
+   unofficialDifficulty: number;
+   pack: string;
++  packLabel: string;
+   chartTags: ChartTag[];
+   sourceUrl: string;
+ };
+@@ -64,6 +102,7 @@ type InternalSession = {
+   p1Owned: string[];
+   p2Owned: string[];
+   selectedPacks: string[];
++  includeTiers: Tier[];
+   currentRound: number;
+   rounds: RoundState[];
+   updatedAt: string;
+@@ -84,36 +123,54 @@ const chartTags: ChartTag[] = [
+ ];
+ const catalogCache = new Map<number, { songs: CatalogSong[]; source: "v-archive" | "fallback"; fetchedAt: string }>();
+ 
+-const fallbackSongs: CatalogSong[] = [
+-  ["733", "#1f1e33", "ARC", 15.2, "V-ARCHIVE", ["階段", "乱打"]],
+-  ["654", "1! 2! 3! 4! Streaming rn CHU!", "VL2", 15.2, "V-ARCHIVE", ["同時押し", "ハネリズム"]],
+-  ["553", "DIE IN", "VE4", 16.1, "V-ARCHIVE", ["物量", "高速"]],
+-  ["756", "Heliocentrism", "VL4", 15.3, "V-ARCHIVE", ["階段", "高速"]],
+-  ["544", "LIMBO", "EZ2", 15.2, "V-ARCHIVE", ["低速", "混合"]],
+-  ["81", "Nightmare", "P2", 15.3, "V-ARCHIVE", ["物量", "乱打"]],
+-  ["476", "PUPA", "MD", 15.2, "V-ARCHIVE", ["乱打", "高速"]],
+-  ["722", "PUPA (xi Remix)", "RV", 15.2, "V-ARCHIVE", ["乱打", "トリル"]],
+-  ["713", "Rise Up", "VL3", 15.2, "V-ARCHIVE", ["物量", "同時押し"]],
+-  ["767", "The Castle of Báthory", "VL4", 15.2, "V-ARCHIVE", ["低速", "階段"]],
+-  ["524", "Zero-Break", "VE3", 15.3, "V-ARCHIVE", ["物量", "ハネリズム"]],
+-  ["545", "Zeroize", "EZ2", 15.2, "V-ARCHIVE", ["トリル", "高速"]],
+-  ["783", "And Revive The Melody", "OGK", 15.2, "V-ARCHIVE", ["ハネリズム", "同時押し"]],
+-  ["789", "LAMIA", "OGK", 15.3, "V-ARCHIVE", ["物量", "高速"]],
+-  ["794", "MEGATØNiX PHANTØM", "CP", 15.2, "V-ARCHIVE", ["乱打", "混合"]],
+-  ["815", "Megingjord", "VL5", 15.2, "V-ARCHIVE", ["物量", "階段"]],
+-  ["807", "RE;DIEIN", "VL5", 15.2, "V-ARCHIVE", ["乱打", "高速"]],
+-  ["810", "Sleipnir", "VL5", 15.2, "V-ARCHIVE", ["トリル", "高速"]],
+-].map(([id, title, chart, level, pack, tags]) => ({
+-  id: String(id),
+-  title: String(title),
+-  artist: "V-ARCHIVE",
+-  chart: String(chart),
+-  officialDifficulty: null,
+-  unofficialDifficulty: Number(level),
+-  pack: String(pack),
+-  chartTags: tags as ChartTag[],
+-  sourceUrl: `https://v-archive.net/db/title/${id}`,
+-}));
++// [id, title, packCode, tier, level, tags] — packCode/tier/level are sourced
++// from V-ARCHIVE's 서열표 (grade table) so the offline fallback still reflects
++// real official DLC packs and includes MX-tier (not just SC-tier) charts.
++const fallbackSongs: CatalogSong[] = (
++  [
++    ["733", "#1f1e33", "ARC", "SC", 15.2, ["階段", "乱打"]],
++    ["654", "1! 2! 3! 4! Streaming rn CHU!", "VL2", "SC", 15.2, ["同時押し", "ハネリズム"]],
++    ["553", "DIE IN", "VE4", "SC", 16.1, ["物量", "高速"]],
++    ["553", "DIE IN", "VE4", "MX", 15.2, ["物量", "高速"]],
++    ["756", "Heliocentrism", "VL4", "SC", 15.3, ["階段", "高速"]],
++    ["544", "LIMBO", "EZ2", "SC", 15.2, ["低速", "混合"]],
++    ["544", "LIMBO", "EZ2", "MX", 14.2, ["低速", "混合"]],
++    ["81", "Nightmare", "P2", "SC", 15.3, ["物量", "乱打"]],
++    ["476", "PUPA", "MD", "SC", 15.2, ["乱打", "高速"]],
++    ["476", "PUPA", "MD", "MX", 15.1, ["乱打", "高速"]],
++    ["722", "PUPA (xi Remix)", "RV", "SC", 15.2, ["乱打", "トリル"]],
++    ["713", "Rise Up", "VL3", "SC", 15.2, ["物量", "同時押し"]],
++    ["767", "The Castle of Báthory", "VL4", "SC", 15.2, ["低速", "階段"]],
++    ["767", "The Castle of Báthory", "VL4", "MX", 15.1, ["低速", "階段"]],
++    ["524", "Zero-Break", "VE3", "SC", 15.3, ["物量", "ハネリズム"]],
++    ["545", "Zeroize", "EZ2", "SC", 15.2, ["トリル", "高速"]],
++    ["545", "Zeroize", "EZ2", "MX", 14.1, ["トリル", "高速"]],
++    ["783", "And Revive The Melody", "OGK", "SC", 15.2, ["ハネリズム", "同時押し"]],
++    ["789", "LAMIA", "OGK", "SC", 15.3, ["物量", "高速"]],
++    ["789", "LAMIA", "OGK", "MX", 15.1, ["物量", "高速"]],
++    ["794", "MEGATØNiX PHANTØM", "CP", "SC", 15.2, ["乱打", "混合"]],
++    ["815", "Megingjord", "VL5", "SC", 15.2, ["物量", "階段"]],
++    ["815", "Megingjord", "VL5", "MX", 15.1, ["物量", "階段"]],
++    ["807", "RE;DIEIN", "VL5", "SC", 15.2, ["乱打", "高速"]],
++    ["810", "Sleipnir", "VL5", "SC", 15.2, ["トリル", "高速"]],
++    ["810", "Sleipnir", "VL5", "MX", 15.2, ["トリル", "高速"]],
++  ] as const
++).map(([id, title, packCode, tier, level, tags]) => {
++  const { pack, packLabel } = resolvePack(packCode);
++  return {
++    id: `${id}-${tier}`,
++    title: String(title),
++    artist: "V-ARCHIVE",
++    chart: packCode,
++    tier: tier as Tier,
++    officialDifficulty: null,
++    unofficialDifficulty: Number(level),
++    pack,
++    packLabel,
++    chartTags: tags as unknown as ChartTag[],
++    sourceUrl: `https://v-archive.net/db/title/${id}`,
++  };
++});
+ 
+ function makeKey() {
+   let key = "";
+@@ -204,6 +261,7 @@ function responseFor(session: InternalSession, token: string | undefined) {
+     p1Owned: session.p1Owned,
+     p2Owned: session.p2Owned,
+     selectedPacks: session.selectedPacks,
++    includeTiers: session.includeTiers?.length ? session.includeTiers : DEFAULT_TIERS,
+     currentRound: session.currentRound,
+     rounds: session.rounds.map((round) => ({
+       label: round.label,
+@@ -273,8 +331,11 @@ function guessTags(title: string): ChartTag[] {
+   return ["未分類"];
+ }
+ 
++// V-ARCHIVE's MAX DJ POWER page (djpower) only lists SC-tier charts. The
++// 서열표 (grade / ranking table) page covers SC/MX/HD/NM for every level, and
++// also prints each song's DLC pack code, so we use that instead.
+ async function fetchVArchive(button: 4 | 5 | 6 | 8) {
+-  const sourceUrl = `https://v-archive.net/djpower/${button}`;
++  const sourceUrl = `https://v-archive.net/grade/${button}/ALL`;
+   try {
+     const response = await fetch(sourceUrl, { signal: AbortSignal.timeout(8000) });
+     if (!response.ok) throw new Error(`V-ARCHIVE returned ${response.status}`);
+@@ -282,21 +343,34 @@ async function fetchVArchive(button: 4 | 5 | 6 | 8) {
+     const songs: CatalogSong[] = [];
+     const songPattern = /href=["']\/db\/title\/(\d+)["'][^>]*>([^<]+)<\/a>/g;
+     let match: RegExpExecArray | null;
+-    while ((match = songPattern.exec(html)) !== null && songs.length < 800) {
++    while ((match = songPattern.exec(html)) !== null && songs.length < 2000) {
+       const id = match[1];
+       const title = normalizeTitle(match[2].replace(/&amp;/g, "&"));
+-      const context = html.slice(Math.max(0, match.index - 8000), match.index);
++      // Best-effort: look at the markup immediately around each song link for
++      // its tier (SC/MX/HD/NM), level, and DLC pack code. V-ARCHIVE doesn't
++      // publish a stable API for this, so if their markup changes this may
++      // need retuning — it always falls back to the offline catalog below.
++      const context = html.slice(Math.max(0, match.index - 400), match.index);
+       const levelMatches = [...context.matchAll(/<h4[^>]*>\s*(\d+(?:\.\d+)?)\s*<\/h4>/gi)];
+       const level = levelMatches.length ? Number(levelMatches[levelMatches.length - 1][1]) : null;
+-      if (level === null || songs.some((song) => song.id === id && song.unofficialDifficulty === level)) continue;
++      const tierMatches = [...context.matchAll(/\b(SC|MX|HD|NM)\b/g)];
++      const tier = (tierMatches.length ? tierMatches[tierMatches.length - 1][1] : "SC") as Tier;
++      const packMatches = [...context.matchAll(/>\s*([A-Z]{1,4}[0-9]?)\s*<\/[a-z]+>\s*(?:<[^>]+>\s*)*$/gi)];
++      const packCode = packMatches.length ? packMatches[packMatches.length - 1][1] : "R";
++      if (level === null) continue;
++      const dedupeKey = `${id}-${tier}`;
++      if (songs.some((song) => song.id === dedupeKey)) continue;
++      const { pack, packLabel } = resolvePack(packCode);
+       songs.push({
+-        id: `${button}b-${id}-${level}`,
++        id: dedupeKey,
+         title,
+         artist: "V-ARCHIVE",
+         chart: `${button}B`,
++        tier,
+         officialDifficulty: null,
+         unofficialDifficulty: level,
+-        pack: "V-ARCHIVE",
++        pack,
++        packLabel,
+         chartTags: guessTags(title),
+         sourceUrl: `https://v-archive.net/db/title/${id}`,
+       });
+@@ -320,8 +394,10 @@ function availableSongs(session: InternalSession, catalog: CatalogSong[]) {
+   const current = session.rounds[session.currentRound];
+   if (!current) return [];
+   const selected = new Set(session.selectedPacks);
++  const tiers = new Set(session.includeTiers?.length ? session.includeTiers : DEFAULT_TIERS);
+   return catalog.filter(
+     (song) =>
++      tiers.has(song.tier) &&
+       (selected.size === 0 || selected.has(song.pack)) &&
+       session.p1Owned.includes(song.pack) &&
+       session.p2Owned.includes(song.pack) &&
+@@ -338,10 +414,7 @@ router.get("/catalog/:button", async (req, res) => {
+     return;
+   }
+   const catalog = await getCatalog(parsed.data.button);
+-  res.json({
+-    ...catalog,
+-    sourceUrl: `https://v-archive.net/djpower/${parsed.data.button}`,
+-  });
++  res.json(catalog);
+ });
+ 
+ router.post("/sessions", async (req, res) => {
+@@ -365,6 +438,7 @@ router.post("/sessions", async (req, res) => {
+     p1Owned: input.p1Owned,
+     p2Owned: input.p2Owned,
+     selectedPacks: input.selectedPacks,
++    includeTiers: (input.includeTiers?.length ? input.includeTiers : DEFAULT_TIERS) as Tier[],
+     currentRound: 0,
+     rounds: roundRange(input.centerDifficulty, input.lowerOffset, input.upperOffset),
+     updatedAt: new Date().toISOString(),
+@@ -441,6 +515,7 @@ router.post("/sessions/:key/actions", async (req, res) => {
+     if (input.p1Owned) session.p1Owned = input.p1Owned;
+     if (input.p2Owned) session.p2Owned = input.p2Owned;
+     if (input.selectedPacks) session.selectedPacks = input.selectedPacks;
++    if (input.includeTiers?.length) session.includeTiers = input.includeTiers as Tier[];
+     session.rounds = roundRange(session.centerDifficulty, session.lowerOffset, session.upperOffset);
+   } else if (input.action === "start-match") {
+     if (!session.p2) {
+diff --git a/artifacts/djmax-bpl-manager/src/App.tsx b/artifacts/djmax-bpl-manager/src/App.tsx
+index 9a1307b..aaddbde 100644
+--- a/artifacts/djmax-bpl-manager/src/App.tsx
++++ b/artifacts/djmax-bpl-manager/src/App.tsx
+@@ -1,7 +1,7 @@
+ import { useEffect, useMemo, useRef, useState } from 'react';
+ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+ import { applyMatchAction, createMatchSession, getDifficultyCatalog, getMatchSession, joinMatchSession } from '@workspace/api-client-react';
+-import type { CatalogSong, ChartTag, SessionActionInput, SessionCreateInput, SessionState } from '@workspace/api-client-react';
++import type { CatalogSong, ChartTag, SessionActionInput, SessionCreateInput, SessionState, Tier } from '@workspace/api-client-react';
+ import { ErrorBoundary } from '@/components/error-boundary';
+ import { Toaster } from '@/components/ui/toaster';
+ import { TooltipProvider } from '@/components/ui/tooltip';
+@@ -12,17 +12,18 @@ const SESSION_KEY = 'djmax-bpl-session-key';
+ const TOKEN_KEY = 'djmax-bpl-session-token';
+ const SETUP_KEY = 'djmax-bpl-online-setup';
+ const TAGS: ChartTag[] = ['物量', 'ハネリズム', '階段', '乱打', 'トリル', '同時押し', '低速', '高速', '混合'];
+-const PACKS = [
+-  { id: 'V-ARCHIVE', label: 'V-ARCHIVE', sub: '非公式難易度カタログ', accent: 'yellow' },
+-  { id: 'respect', label: 'RESPECT', sub: 'デフォルト / 本体', accent: 'yellow' },
+-  { id: 'v', label: 'V EXTENSION', sub: 'DLC', accent: 'cyan' },
+-  { id: 'black', label: 'BLACK SQUARE', sub: 'DLC', accent: 'pink' },
+-  { id: 'technika', label: 'TECHNIKA', sub: 'DLC', accent: 'purple' },
++const TIER_INFO: { id: Tier; label: string; sub: string }[] = [
++  { id: 'SC', label: 'SC', sub: '最高難度 / DJ POWER対象' },
++  { id: 'MX', label: 'MX', sub: 'SCより広い候補プール' },
++  { id: 'HD', label: 'HD', sub: '中級者向け' },
++  { id: 'NM', label: 'NM', sub: '初級者向け' },
+ ];
++const ACCENTS = ['yellow', 'cyan', 'pink', 'purple'] as const;
++type PackOption = { id: string; label: string };
+ type ButtonMode = 4 | 5 | 6 | 8;
+-type LocalSetup = { name: string; button: ButtonMode; center: number; lower: number; upper: number; p1Owned: string[]; p2Owned: string[]; selectedPacks: string[] };
++type LocalSetup = { name: string; button: ButtonMode; center: number; lower: number; upper: number; p1Owned: string[]; p2Owned: string[]; selectedPacks: string[]; includeTiers: Tier[] };
+ 
+-const initialSetup: LocalSetup = { name: '', button: 4, center: 15, lower: 1, upper: 1, p1Owned: ['V-ARCHIVE'], p2Owned: ['V-ARCHIVE'], selectedPacks: ['V-ARCHIVE'] };
++const initialSetup: LocalSetup = { name: '', button: 4, center: 15, lower: 1, upper: 1, p1Owned: [], p2Owned: [], selectedPacks: [], includeTiers: ['SC'] };
+ const requestWithToken = (token: string) => ({ headers: { 'x-session-player': token } });
+ const loadLocal = <T,>(key: string, fallback: T): T => {
+   try { const value = localStorage.getItem(key); return value ? JSON.parse(value) as T : fallback; } catch { return fallback; }
+@@ -48,6 +49,22 @@ function OnlineApp() {
+   const [copied, setCopied] = useState(false);
+   const lastStrategyEvent = useRef<string | null>(null);
+ 
++  const packOptions = useMemo<PackOption[]>(() => {
++    const byId = new Map<string, string>();
++    for (const song of catalog) byId.set(song.pack, song.packLabel);
++    return [...byId.entries()].map(([id, label]) => ({ id, label })).sort((a, b) => a.label.localeCompare(b.label, 'ja'));
++  }, [catalog]);
++  useEffect(() => {
++    if (!packOptions.length) return;
++    setSetup((value) => {
++      const known = new Set(packOptions.map((pack) => pack.id));
++      const p1Owned = value.p1Owned.length ? value.p1Owned.filter((id) => known.has(id)) : packOptions.map((pack) => pack.id);
++      const p2Owned = value.p2Owned.length ? value.p2Owned.filter((id) => known.has(id)) : packOptions.map((pack) => pack.id);
++      const selectedPacks = value.selectedPacks.length ? value.selectedPacks.filter((id) => known.has(id)) : packOptions.map((pack) => pack.id);
++      if (p1Owned.length === value.p1Owned.length && p2Owned.length === value.p2Owned.length && selectedPacks.length === value.selectedPacks.length) return value;
++      return { ...value, p1Owned, p2Owned, selectedPacks };
++    });
++  }, [packOptions]);
+   const showNotice = (message: string) => { setNotice(message); window.setTimeout(() => setNotice(''), 2800); };
+   const rememberSession = (next: SessionState) => {
+     setSession(next); setSessionKey(next.key); setToken(next.clientToken);
+@@ -91,7 +108,7 @@ function OnlineApp() {
+   const create = async () => {
+     if (!setup.name.trim()) { showNotice('プレイヤー名を入力してください'); return; }
+     setLoading(true);
+-    const input: SessionCreateInput = { playerName: setup.name.trim(), button: setup.button, centerDifficulty: setup.center, lowerOffset: setup.lower, upperOffset: setup.upper, p1Owned: setup.p1Owned, p2Owned: setup.p2Owned, selectedPacks: setup.selectedPacks };
++    const input: SessionCreateInput = { playerName: setup.name.trim(), button: setup.button, centerDifficulty: setup.center, lowerOffset: setup.lower, upperOffset: setup.upper, p1Owned: setup.p1Owned, p2Owned: setup.p2Owned, selectedPacks: setup.selectedPacks, includeTiers: setup.includeTiers };
+     try { rememberSession(await createMatchSession(input)); showNotice('セッションを作成しました。キーを相手に渡してください'); }
+     catch { showNotice('セッションを作成できませんでした'); }
+     finally { setLoading(false); }
+@@ -112,6 +129,7 @@ function OnlineApp() {
+         p1Owned: next.p1Owned,
+         p2Owned: next.p2Owned,
+         selectedPacks: next.selectedPacks,
++        includeTiers: next.includeTiers,
+       }));
+       showNotice('セッションに参加しました');
+     }
+@@ -123,11 +141,12 @@ function OnlineApp() {
+   const currentRound = session?.rounds[session.currentRound];
+   const currentSongs = useMemo(() => {
+     if (!session || !currentRound) return [];
+-    return catalog.filter((song) => song.unofficialDifficulty >= currentRound.lower && song.unofficialDifficulty <= currentRound.upper && (!currentRound.tag || song.chartTags.includes(currentRound.tag)) && (session.selectedPacks.length === 0 || session.selectedPacks.includes(song.pack)));
++    const tiers = new Set(session.includeTiers.length ? session.includeTiers : ['SC']);
++    return catalog.filter((song) => tiers.has(song.tier) && song.unofficialDifficulty >= currentRound.lower && song.unofficialDifficulty <= currentRound.upper && (!currentRound.tag || song.chartTags.includes(currentRound.tag)) && (session.selectedPacks.length === 0 || session.selectedPacks.includes(song.pack)));
+   }, [catalog, currentRound, session]);
+ 
+-  if (!session) return <Lobby setup={setup} setSetup={setSetup} joinKey={joinKey} setJoinKey={setJoinKey} joinName={joinName} setJoinName={setJoinName} loading={loading} notice={notice} onCreate={create} onJoin={join} onLoadCatalog={() => void loadCatalog(setup.button)} catalogCount={catalog.length} catalogSource={catalogSource} />;
+-  if (session.status === 'waiting' || session.status === 'setup') return <WaitingRoom session={session} setup={setup} setSetup={setSetup} loading={loading} notice={notice} onAction={runAction} onStart={() => void runAction({ action: 'start-match' })} onLeave={leave} onCopy={copyKey} copied={copied} />;
++  if (!session) return <Lobby setup={setup} setSetup={setSetup} joinKey={joinKey} setJoinKey={setJoinKey} joinName={joinName} setJoinName={setJoinName} loading={loading} notice={notice} onCreate={create} onJoin={join} onLoadCatalog={() => void loadCatalog(setup.button)} catalogCount={catalog.length} catalogSource={catalogSource} packOptions={packOptions} />;
++  if (session.status === 'waiting' || session.status === 'setup') return <WaitingRoom session={session} setup={setup} setSetup={setSetup} loading={loading} notice={notice} onAction={runAction} onStart={() => void runAction({ action: 'start-match' })} onLeave={leave} onCopy={copyKey} copied={copied} packOptions={packOptions} />;
+   return <MatchBoard session={session} songs={currentSongs} catalogSource={catalogSource} loading={loading} notice={notice} genreFlash={genreFlash} strategyFlash={strategyFlash} onAction={runAction} onGenre={() => { setGenreFlash(true); window.setTimeout(() => setGenreFlash(false), 420); void runAction({ action: 'draw-chart-tag' }); }} onLeave={leave} onCopy={copyKey} copied={copied} />;
+ }
+ 
+@@ -135,19 +154,21 @@ function Frame({ children, status, notice, onLeave }: { children: React.ReactNod
+   return <main className="online-frame"><header className="online-topbar"><div className="online-brand"><span className="brand-bars"><i /><i /><i /></span><div><strong>DJMAX / BPL 管制室</strong><small>ONLINE MATCH CONTROL</small></div></div><div className="online-status"><span />{status}{onLeave && <button onClick={onLeave}><RotateCcw size={14} /> ロビーへ戻る</button>}</div></header>{notice && <div className="toast-note">{notice}</div>}{children}</main>;
+ }
+ 
+-function Lobby({ setup, setSetup, joinKey, setJoinKey, joinName, setJoinName, loading, notice, onCreate, onJoin, onLoadCatalog, catalogCount, catalogSource }: { setup: LocalSetup; setSetup: React.Dispatch<React.SetStateAction<LocalSetup>>; joinKey: string; setJoinKey: (value: string) => void; joinName: string; setJoinName: (value: string) => void; loading: boolean; notice: string; onCreate: () => void; onJoin: () => void; onLoadCatalog: () => void; catalogCount: number; catalogSource: string | null }) {
++function Lobby({ setup, setSetup, joinKey, setJoinKey, joinName, setJoinName, loading, notice, onCreate, onJoin, onLoadCatalog, catalogCount, catalogSource, packOptions }: { setup: LocalSetup; setSetup: React.Dispatch<React.SetStateAction<LocalSetup>>; joinKey: string; setJoinKey: (value: string) => void; joinName: string; setJoinName: (value: string) => void; loading: boolean; notice: string; onCreate: () => void; onJoin: () => void; onLoadCatalog: () => void; catalogCount: number; catalogSource: string | null; packOptions: PackOption[] }) {
+   const toggle = (field: 'p1Owned' | 'p2Owned' | 'selectedPacks', id: string) => setSetup((value) => ({ ...value, [field]: value[field].includes(id) ? value[field].filter((item) => item !== id) : [...value[field], id] }));
+-  return <Frame status="READY / ONLINE" notice={notice}><div className="lobby-layout"><section className="lobby-hero"><div className="eyebrow"><Swords size={14} /> ONLINE SESSION / 002</div><h1>キーを渡して、<em>同じ盤面</em>で戦う。</h1><p>セッションキーで相手を招待。設定・抽選・ストラテジーを、2つの画面でリアルタイム同期します。</p><div className="hero-rule"><span>V-ARCHIVE</span><span>CHART-BASED TAGS</span><span>SYNCED</span></div></section><section className="lobby-panel"><div className="lobby-tabs"><span className="active"><UserPlus size={16} /> 新しいセッション</span><span><LogIn size={16} /> 参加する</span></div><div className="lobby-forms"><div className="form-block"><label>あなたのプレイヤー名</label><input value={setup.name} onChange={(event) => setSetup((value) => ({ ...value, name: event.target.value }))} placeholder="PLAYER 01" maxLength={18} /><div className="form-help">セッション作成後にキーが発行されます</div></div><button className="primary-action" onClick={onCreate} disabled={loading}>{loading ? <LoaderCircle className="spin" size={17} /> : <Link2 size={17} />} セッションを作成</button><div className="divider"><span>または</span></div><div className="form-block"><label>相手から受け取ったセッションキー</label><div className="key-input"><input value={joinKey} onChange={(event) => setJoinKey(event.target.value.toUpperCase())} placeholder="ABC123" maxLength={6} /><span>6桁</span></div><input value={joinName} onChange={(event) => setJoinName(event.target.value)} placeholder="あなたのプレイヤー名" maxLength={18} /></div><button className="secondary-action" onClick={onJoin} disabled={loading}><LogIn size={17} /> キーで参加する</button></div><div className="catalog-setup"><div className="catalog-head"><div><span className="eyebrow">DATA SOURCE</span><strong>非公式難易度</strong></div><button onClick={onLoadCatalog}><RefreshCw size={14} /> 4Bを再取得</button></div><p>V-ARCHIVE MAX DJ POWERの値を中心難易度と選曲帯に使用します。現在 {catalogCount} 譜面 / {catalogSource === 'v-archive' ? 'V-ARCHIVE接続中' : catalogSource === 'fallback' ? '内蔵フォールバック' : '未取得'}。</p><a href="https://v-archive.net/djpower/4" target="_blank" rel="noreferrer">V-ARCHIVE 4Bを開く <ExternalLink size={13} /></a></div></section></div><SetupControls setup={setup} setSetup={setSetup} toggle={toggle} /></Frame>;
++  const toggleTier = (id: Tier) => setSetup((value) => ({ ...value, includeTiers: value.includeTiers.includes(id) ? value.includeTiers.filter((item) => item !== id) : [...value.includeTiers, id] }));
++  return <Frame status="READY / ONLINE" notice={notice}><div className="lobby-layout"><section className="lobby-hero"><div className="eyebrow"><Swords size={14} /> ONLINE SESSION / 002</div><h1>キーを渡して、<em>同じ盤面</em>で戦う。</h1><p>セッションキーで相手を招待。設定・抽選・ストラテジーを、2つの画面でリアルタイム同期します。</p><div className="hero-rule"><span>V-ARCHIVE</span><span>CHART-BASED TAGS</span><span>SYNCED</span></div></section><section className="lobby-panel"><div className="lobby-tabs"><span className="active"><UserPlus size={16} /> 新しいセッション</span><span><LogIn size={16} /> 参加する</span></div><div className="lobby-forms"><div className="form-block"><label>あなたのプレイヤー名</label><input value={setup.name} onChange={(event) => setSetup((value) => ({ ...value, name: event.target.value }))} placeholder="PLAYER 01" maxLength={18} /><div className="form-help">セッション作成後にキーが発行されます</div></div><button className="primary-action" onClick={onCreate} disabled={loading}>{loading ? <LoaderCircle className="spin" size={17} /> : <Link2 size={17} />} セッションを作成</button><div className="divider"><span>または</span></div><div className="form-block"><label>相手から受け取ったセッションキー</label><div className="key-input"><input value={joinKey} onChange={(event) => setJoinKey(event.target.value.toUpperCase())} placeholder="ABC123" maxLength={6} /><span>6桁</span></div><input value={joinName} onChange={(event) => setJoinName(event.target.value)} placeholder="あなたのプレイヤー名" maxLength={18} /></div><button className="secondary-action" onClick={onJoin} disabled={loading}><LogIn size={17} /> キーで参加する</button></div><div className="catalog-setup"><div className="catalog-head"><div><span className="eyebrow">DATA SOURCE</span><strong>非公式難易度</strong></div><button onClick={onLoadCatalog}><RefreshCw size={14} /> 4Bを再取得</button></div><p>V-ARCHIVE MAX DJ POWERの値を中心難易度と選曲帯に使用します。現在 {catalogCount} 譜面 / {catalogSource === 'v-archive' ? 'V-ARCHIVE接続中' : catalogSource === 'fallback' ? '内蔵フォールバック' : '未取得'}。</p><a href="https://v-archive.net/djpower/4" target="_blank" rel="noreferrer">V-ARCHIVE 4Bを開く <ExternalLink size={13} /></a></div></section></div><SetupControls setup={setup} setSetup={setSetup} toggle={toggle} toggleTier={toggleTier} packOptions={packOptions} /></Frame>;
+ }
+ 
+-function SetupControls({ setup, setSetup, toggle }: { setup: LocalSetup; setSetup: React.Dispatch<React.SetStateAction<LocalSetup>>; toggle: (field: 'p1Owned' | 'p2Owned' | 'selectedPacks', id: string) => void }) {
+-  return <section className="setup-controls"><div className="control-heading"><div><span className="eyebrow">MATCH PARAMETERS</span><h2>対戦盤面を先に固定する</h2></div><span className="control-note">参加後も2人で変更できます</span></div><div className="control-grid"><div className="control-card"><div className="card-title"><span>ボタンモード</span><small>V-ARCHIVE対象</small></div><div className="mode-row">{([4, 5, 6, 8] as ButtonMode[]).map((button) => <button key={button} className={setup.button === button ? 'selected' : ''} onClick={() => setSetup((value) => ({ ...value, button }))}>{button}B</button>)}</div></div><div className="control-card"><div className="card-title"><span>中心難易度</span><small>V-ARCHIVE MAX DJ POWER</small></div><div className="number-line"><input type="number" min={1} max={20} step={0.1} value={setup.center} onChange={(event) => setSetup((value) => ({ ...value, center: Number(event.target.value) }))} /><b>SC</b></div><div className="offsets"><label>下方向 <input type="number" min={0} max={5} step={0.1} value={setup.lower} onChange={(event) => setSetup((value) => ({ ...value, lower: Number(event.target.value) }))} /></label><label>上方向 <input type="number" min={0} max={5} step={0.1} value={setup.upper} onChange={(event) => setSetup((value) => ({ ...value, upper: Number(event.target.value) }))} /></label></div><p>LOWは中心より下、MIDは中心付近、HIGHは中心より上</p></div><div className="control-card ownership-card"><div className="card-title"><span>所持DLC / 共有プール</span><small>両者がチェックしたものだけ使用</small></div><div className="ownership-lines">{PACKS.map((pack) => <div className="ownership-line" key={pack.id}><div><i className={`pack-dot ${pack.accent}`} /><strong>{pack.label}</strong><small>{pack.sub}</small></div><button className={setup.p1Owned.includes(pack.id) ? 'owned p1' : ''} onClick={() => toggle('p1Owned', pack.id)}>P1 {setup.p1Owned.includes(pack.id) ? '所持' : '未所持'}</button><button className={setup.p2Owned.includes(pack.id) ? 'owned p2' : ''} onClick={() => toggle('p2Owned', pack.id)}>P2 {setup.p2Owned.includes(pack.id) ? '所持' : '未所持'}</button><button className={setup.selectedPacks.includes(pack.id) ? 'pool' : ''} disabled={!setup.p1Owned.includes(pack.id) || !setup.p2Owned.includes(pack.id)} onClick={() => toggle('selectedPacks', pack.id)}>{setup.selectedPacks.includes(pack.id) ? <Check size={14} /> : <span>+</span>} 共有</button></div>)}</div></div></div><p className="data-note"><Gauge size={14} /> 公式難易度ではなく、V-ARCHIVEの非公式値を採用。譜面傾向タグは「曲のジャンル」ではなく、物量・ハネリズム・階段などの譜面内容を示します。</p></section>;
++function SetupControls({ setup, setSetup, toggle, toggleTier, packOptions }: { setup: LocalSetup; setSetup: React.Dispatch<React.SetStateAction<LocalSetup>>; toggle: (field: 'p1Owned' | 'p2Owned' | 'selectedPacks', id: string) => void; toggleTier: (id: Tier) => void; packOptions: PackOption[] }) {
++  return <section className="setup-controls"><div className="control-heading"><div><span className="eyebrow">MATCH PARAMETERS</span><h2>対戦盤面を先に固定する</h2></div><span className="control-note">参加後も2人で変更できます</span></div><div className="control-grid"><div className="control-card"><div className="card-title"><span>ボタンモード</span><small>V-ARCHIVE対象</small></div><div className="mode-row">{([4, 5, 6, 8] as ButtonMode[]).map((button) => <button key={button} className={setup.button === button ? 'selected' : ''} onClick={() => setSetup((value) => ({ ...value, button }))}>{button}B</button>)}</div></div><div className="control-card"><div className="card-title"><span>中心難易度</span><small>V-ARCHIVE MAX DJ POWER</small></div><div className="number-line"><input type="number" min={1} max={20} step={0.1} value={setup.center} onChange={(event) => setSetup((value) => ({ ...value, center: Number(event.target.value) }))} /><b>SC</b></div><div className="offsets"><label>下方向 <input type="number" min={0} max={5} step={0.1} value={setup.lower} onChange={(event) => setSetup((value) => ({ ...value, lower: Number(event.target.value) }))} /></label><label>上方向 <input type="number" min={0} max={5} step={0.1} value={setup.upper} onChange={(event) => setSetup((value) => ({ ...value, upper: Number(event.target.value) }))} /></label></div><p>LOWは中心より下、MIDは中心付近、HIGHは中心より上</p></div><div className="control-card tier-card"><div className="card-title"><span>難易度帯</span><small>選曲候補に含めるティア</small></div><div className="tier-row">{TIER_INFO.map((tier) => <button key={tier.id} className={setup.includeTiers.includes(tier.id) ? 'selected' : ''} onClick={() => toggleTier(tier.id)} title={tier.sub}>{tier.label}</button>)}</div><p>SCのみだと候補が少ない場合は、MXなど下位ティアも含めると選曲プールが広がります</p></div><div className="control-card ownership-card"><div className="card-title"><span>所持DLC / 共有プール</span><small>両者がチェックしたものだけ使用</small></div><div className="ownership-lines">{packOptions.length ? packOptions.map((pack, index) => <div className="ownership-line" key={pack.id}><div><i className={`pack-dot ${ACCENTS[index % ACCENTS.length]}`} /><strong>{pack.label}</strong></div><button className={setup.p1Owned.includes(pack.id) ? 'owned p1' : ''} onClick={() => toggle('p1Owned', pack.id)}>P1 {setup.p1Owned.includes(pack.id) ? '所持' : '未所持'}</button><button className={setup.p2Owned.includes(pack.id) ? 'owned p2' : ''} onClick={() => toggle('p2Owned', pack.id)}>P2 {setup.p2Owned.includes(pack.id) ? '所持' : '未所持'}</button><button className={setup.selectedPacks.includes(pack.id) ? 'pool' : ''} disabled={!setup.p1Owned.includes(pack.id) || !setup.p2Owned.includes(pack.id)} onClick={() => toggle('selectedPacks', pack.id)}>{setup.selectedPacks.includes(pack.id) ? <Check size={14} /> : <span>+</span>} 共有</button></div>) : <p className="control-note">カタログ取得後にDLCパック一覧が表示されます</p>}</div></div></div><p className="data-note"><Gauge size={14} /> 公式難易度ではなく、V-ARCHIVEの非公式値を採用。譜面傾向タグは「曲のジャンル」ではなく、物量・ハネリズム・階段などの譜面内容を示します。</p></section>;
+ }
+ 
+-function WaitingRoom({ session, setup, setSetup, loading, notice, onAction, onStart, onLeave, onCopy, copied }: { session: SessionState; setup: LocalSetup; setSetup: React.Dispatch<React.SetStateAction<LocalSetup>>; loading: boolean; notice: string; onAction: (action: SessionActionInput) => Promise<void>; onStart: () => void; onLeave: () => void; onCopy: () => void; copied: boolean }) {
++function WaitingRoom({ session, setup, setSetup, loading, notice, onAction, onStart, onLeave, onCopy, copied, packOptions }: { session: SessionState; setup: LocalSetup; setSetup: React.Dispatch<React.SetStateAction<LocalSetup>>; loading: boolean; notice: string; onAction: (action: SessionActionInput) => Promise<void>; onStart: () => void; onLeave: () => void; onCopy: () => void; copied: boolean; packOptions: PackOption[] }) {
+   const toggle = (field: 'p1Owned' | 'p2Owned' | 'selectedPacks', id: string) => setSetup((value) => ({ ...value, [field]: value[field].includes(id) ? value[field].filter((item) => item !== id) : [...value[field], id] }));
+-  const syncSetup = () => void onAction({ action: 'set-setup', button: setup.button, centerDifficulty: setup.center, lowerOffset: setup.lower, upperOffset: setup.upper, p1Owned: setup.p1Owned, p2Owned: setup.p2Owned, selectedPacks: setup.selectedPacks });
+-  return <Frame status={session.status === 'waiting' ? 'WAITING FOR OPPONENT' : 'BOTH PLAYERS READY'} notice={notice} onLeave={onLeave}><div className="room-shell"><section className="room-key-card"><div className="eyebrow"><LockKeyhole size={14} /> PRIVATE SESSION KEY</div><h1>{session.key}</h1><p>このキーを相手に共有してください。相手は「キーで参加する」から参加できます。</p><button className="copy-key" onClick={onCopy}>{copied ? <><Check size={17} /> コピーしました</> : <><Copy size={17} /> セッションキーをコピー</>}</button><div className="room-players"><div className="room-player p1"><span>PLAYER 01 / HOST</span><strong>{session.p1}</strong><i>接続中</i></div><div className="room-vs">VS</div><div className="room-player p2"><span>PLAYER 02 / GUEST</span><strong>{session.p2 ?? '参加待ち…'}</strong><i className={session.p2 ? 'connected' : ''}>{session.p2 ? '接続中' : 'キーを共有'}</i></div></div></section><section className="room-settings"><div className="room-setting-head"><div><span className="eyebrow">SHARED SETUP</span><h2>共有設定</h2></div><button className="ghost-action" onClick={syncSetup} disabled={loading}><RefreshCw size={15} /> 同期する</button></div><div className="center-readout"><span>中心難易度</span><strong>{session.centerDifficulty.toFixed(1)}</strong><small>SC / V-ARCHIVE</small></div><div className="room-ranges">{session.rounds.map((round, index) => <div className={index === 1 ? 'active' : ''} key={round.label}><span>0{index + 1}</span><strong>{round.label}</strong><small>{round.lower.toFixed(1)} — {round.upper.toFixed(1)}</small></div>)}</div><div className="room-dlc-row"><span>共有プール</span>{session.selectedPacks.map((pack) => <b key={pack}>{pack}</b>)}</div>{session.status === 'waiting' ? <div className="waiting-message"><LoaderCircle className="spin" size={17} /> 相手の参加を待っています</div> : <button className="primary-action wide" onClick={onStart} disabled={loading}><Swords size={17} /> この設定で対戦を開始 <ChevronRight size={17} /></button>}<p className="room-footnote">設定を変更したら「同期する」を押してください。相手の画面にも反映されます。</p></section></div><SetupControls setup={setup} setSetup={setSetup} toggle={toggle} /></Frame>;
++  const toggleTier = (id: Tier) => setSetup((value) => ({ ...value, includeTiers: value.includeTiers.includes(id) ? value.includeTiers.filter((item) => item !== id) : [...value.includeTiers, id] }));
++  const syncSetup = () => void onAction({ action: 'set-setup', button: setup.button, centerDifficulty: setup.center, lowerOffset: setup.lower, upperOffset: setup.upper, p1Owned: setup.p1Owned, p2Owned: setup.p2Owned, selectedPacks: setup.selectedPacks, includeTiers: setup.includeTiers });
++  return <Frame status={session.status === 'waiting' ? 'WAITING FOR OPPONENT' : 'BOTH PLAYERS READY'} notice={notice} onLeave={onLeave}><div className="room-shell"><section className="room-key-card"><div className="eyebrow"><LockKeyhole size={14} /> PRIVATE SESSION KEY</div><h1>{session.key}</h1><p>このキーを相手に共有してください。相手は「キーで参加する」から参加できます。</p><button className="copy-key" onClick={onCopy}>{copied ? <><Check size={17} /> コピーしました</> : <><Copy size={17} /> セッションキーをコピー</>}</button><div className="room-players"><div className="room-player p1"><span>PLAYER 01 / HOST</span><strong>{session.p1}</strong><i>接続中</i></div><div className="room-vs">VS</div><div className="room-player p2"><span>PLAYER 02 / GUEST</span><strong>{session.p2 ?? '参加待ち…'}</strong><i className={session.p2 ? 'connected' : ''}>{session.p2 ? '接続中' : 'キーを共有'}</i></div></div></section><section className="room-settings"><div className="room-setting-head"><div><span className="eyebrow">SHARED SETUP</span><h2>共有設定</h2></div><button className="ghost-action" onClick={syncSetup} disabled={loading}><RefreshCw size={15} /> 同期する</button></div><div className="center-readout"><span>中心難易度</span><strong>{session.centerDifficulty.toFixed(1)}</strong><small>SC / V-ARCHIVE</small></div><div className="room-ranges">{session.rounds.map((round, index) => <div className={index === 1 ? 'active' : ''} key={round.label}><span>0{index + 1}</span><strong>{round.label}</strong><small>{round.lower.toFixed(1)} — {round.upper.toFixed(1)}</small></div>)}</div><div className="room-dlc-row"><span>共有プール</span>{session.selectedPacks.map((pack) => <b key={pack}>{packOptions.find((option) => option.id === pack)?.label ?? pack}</b>)}</div><div className="room-dlc-row"><span>難易度帯</span>{(session.includeTiers.length ? session.includeTiers : ['SC']).map((tier) => <b key={tier}>{tier}</b>)}</div>{session.status === 'waiting' ? <div className="waiting-message"><LoaderCircle className="spin" size={17} /> 相手の参加を待っています</div> : <button className="primary-action wide" onClick={onStart} disabled={loading}><Swords size={17} /> この設定で対戦を開始 <ChevronRight size={17} /></button>}<p className="room-footnote">設定を変更したら「同期する」を押してください。相手の画面にも反映されます。</p></section></div><SetupControls setup={setup} setSetup={setSetup} toggle={toggle} toggleTier={toggleTier} packOptions={packOptions} /></Frame>;
+ }
+ 
+ function MatchBoard({ session, songs, catalogSource, loading, notice, genreFlash, strategyFlash, onAction, onGenre, onLeave, onCopy, copied }: { session: SessionState; songs: CatalogSong[]; catalogSource: string | null; loading: boolean; notice: string; genreFlash: boolean; strategyFlash: boolean; onAction: (action: SessionActionInput) => Promise<void>; onGenre: () => void; onLeave: () => void; onCopy: () => void; copied: boolean }) {
+@@ -165,7 +186,7 @@ function MatchBoard({ session, songs, catalogSource, loading, notice, genreFlash
+       {strategyFlash && <div className="strategy-overlay"><div className="strategy-burst"><Zap size={30} /><strong>{round.strategyOutcome === 'cancelled' ? 'STRATEGY CANCELLED' : 'STRATEGY ACTIVATED'}</strong><span>{round.strategyOutcome === 'cancelled' ? '両者のカードが相殺されました' : 'ランダム選曲を実行しました'}</span></div></div>}
+       <div className={`selection-reveal ${round.revealed ? 'revealed' : ''}`}><div className="selection-heading"><div><span className="eyebrow">BLIND PICK / ROUND 0{session.currentRound + 1}</span><h2>{round.revealed ? '選曲を公開' : 'お互いに選曲中'}</h2></div><span className="reveal-badge">{round.revealed ? <><Check size={13} /> BOTH REVEALED</> : '相手には非公開'}</span></div>{round.revealed ? <div className="revealed-songs"><div><small>{session.p1}</small><strong>{p1Title ?? '未選曲'}</strong></div><span>VS</span><div><small>{session.p2}</small><strong>{p2Title ?? '未選曲'}</strong></div></div> : <div className="blind-status"><div><span className="status-mark mine"><Check size={13} /></span><b>あなた</b><strong>{round.mySongTitle ?? '選曲してください'}</strong></div><div><span className="status-mark waiting"><LockKeyhole size={12} /></span><b>相手</b><strong>{round.opponentSongTitle ?? '選曲完了まで非公開'}</strong></div></div>}</div>
+       <div className="pool-header"><div><span className="eyebrow">V-ARCHIVE / {session.button}B</span><h2>選曲候補</h2></div><span>{songs.length} 譜面</span></div><div className="catalog-source">{catalogSource === 'v-archive' ? <><span className="source-live" /> V-ARCHIVEから取得した非公式難易度</> : '内蔵カタログ（V-ARCHIVE接続失敗時）'}</div>
+-      <div className="song-table">{songs.length ? songs.map((song, index) => <div className={`song-entry ${round.mySongId === song.id ? 'picked' : ''}`} key={song.id}><span className="song-index">{String(index + 1).padStart(2, '0')}</span><div className="song-main"><strong>{song.title}</strong><small>{song.artist} / {song.chart}</small></div><div className="tag-list">{song.chartTags.map((tag) => <span key={tag}>{tag}</span>)}</div><b className="unofficial-level">{song.unofficialDifficulty.toFixed(1)}</b><button disabled={round.revealed || myCardActive} onClick={() => void onAction({ action: 'pick-song', songId: song.id })}>{round.mySongId === song.id ? <Check size={15} /> : '選曲'}</button></div>) : <div className="empty-catalog"><Gauge size={23} /><strong>この帯域の候補がありません</strong><span>中心難易度または上下幅を調整してください</span></div>}</div>
++      <div className="song-table">{songs.length ? songs.map((song, index) => <div className={`song-entry ${round.mySongId === song.id ? 'picked' : ''}`} key={song.id}><span className="song-index">{String(index + 1).padStart(2, '0')}</span><div className="song-main"><strong>{song.title}</strong><small><b className={`tier-badge ${song.tier.toLowerCase()}`}>{song.tier}</b> {song.packLabel}</small></div><div className="tag-list">{song.chartTags.map((tag) => <span key={tag}>{tag}</span>)}</div><b className="unofficial-level">{song.unofficialDifficulty.toFixed(1)}</b><button disabled={round.revealed || myCardActive} onClick={() => void onAction({ action: 'pick-song', songId: song.id })}>{round.mySongId === song.id ? <Check size={15} /> : '選曲'}</button></div>) : <div className="empty-catalog"><Gauge size={23} /><strong>この帯域の候補がありません</strong><span>中心難易度または上下幅を調整してください。難易度帯（SC以外）を増やすと候補が広がります</span></div>}</div>
+     </section><aside>
+       <div className="side-panel strategy-panel"><div className="panel-head"><div><span className="eyebrow">TACTICAL CARD</span><h2>ストラテジー</h2></div><Shield size={20} /></div><p>カードを使うと自分の選曲がランダム決定されます。両者が使うと相殺されます。</p><StrategyRow name={session.p1} active={round.p1Card} isMine={isHost} disabled={loading || round.resolved || round.revealed || round.p1Card} onUse={() => void onAction({ action: 'use-strategy' })} /><div className="strategy-divider">VS</div><StrategyRow name={session.p2 ?? '相手待ち'} active={round.p2Card} isMine={!isHost} disabled={loading || round.resolved || round.revealed || round.p2Card} onUse={() => void onAction({ action: 'use-strategy' })} /><div className={`strategy-status ${round.strategyOutcome === 'cancelled' ? 'cancelled' : round.strategyOutcome === 'random' ? 'used' : ''}`}>{bothCards ? <><Check size={15} /> 両者使用 / 相殺成立</> : round.strategyOutcome === 'random' ? <><Zap size={15} /> ランダム選曲済み</> : <><LockKeyhole size={14} /> 使用タイミングを選択</>}</div>{bothCards && !round.resolved && <button className="resolve-card" onClick={() => void onAction({ action: 'resolve-strategy' })}>相殺を確定する <Check size={15} /></button>}{round.strategyOutcome === 'random' && myCardActive && round.mySongTitle && <div className="strategy-pick"><small>あなたのランダム選曲</small><strong>{round.mySongTitle}</strong></div>}</div>
+       <div className="side-panel protocol-panel"><div className="panel-head"><div><span className="eyebrow">MATCH PROTOCOL</span><h2>進行状況</h2></div><Trophy size={19} /></div><div className="protocol-row"><span>中心</span><strong>{session.centerDifficulty.toFixed(1)} SC</strong></div><div className="protocol-row"><span>現在</span><strong>{round.lower.toFixed(1)} — {round.upper.toFixed(1)}</strong></div><div className="protocol-row"><span>傾向</span><strong>{round.tag ?? '未抽選'}</strong></div></div><button className="next-round" onClick={() => void onAction({ action: 'advance-round' })} disabled={loading || !round.revealed}>{session.currentRound === 2 ? <><Trophy size={18} /> セットを完了</> : <>次のラウンドへ <ChevronRight size={18} /></>}</button>
+diff --git a/artifacts/djmax-bpl-manager/src/index.css b/artifacts/djmax-bpl-manager/src/index.css
+index cff6709..70b476a 100644
+--- a/artifacts/djmax-bpl-manager/src/index.css
++++ b/artifacts/djmax-bpl-manager/src/index.css
+@@ -560,6 +560,15 @@ button:disabled { cursor: not-allowed; opacity: .42; }
+ .ownership-line button.owned.p1 { border-color: rgba(80,216,223,.6); color: var(--online-cyan); }
+ .ownership-line button.owned.p2 { border-color: rgba(240,117,165,.6); color: var(--online-pink); }
+ .ownership-line button.pool { border-color: var(--online-yellow); background: rgba(245,197,76,.12); color: var(--online-yellow); }
++.tier-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 16px; }
++.tier-row button { height: 40px; border: 1px solid #354158; background: #141a2b; color: #8996ab; font: 13px 'DM Mono', monospace; }
++.tier-row button.selected { border-color: var(--online-cyan); background: rgba(80,216,223,.13); color: var(--online-cyan); }
++.tier-card p { margin-top: 12px; }
++.tier-badge { display: inline-block; padding: 1px 5px; margin-right: 5px; border-radius: 3px; font: 10px 'DM Mono', monospace; border: 1px solid #354158; color: #8996ab; }
++.tier-badge.sc { border-color: var(--online-yellow); color: var(--online-yellow); }
++.tier-badge.mx { border-color: var(--online-cyan); color: var(--online-cyan); }
++.tier-badge.hd { border-color: var(--online-pink); color: var(--online-pink); }
++.tier-badge.nm { border-color: #b095ff; color: #b095ff; }
+ .data-note { gap: 7px; margin: 28px 0 0; color: #8692a7; font-size: 11px; }
+ 
+ /* Waiting room */
+diff --git a/lib/api-client-react/src/generated/api.schemas.ts b/lib/api-client-react/src/generated/api.schemas.ts
+index bd89757..663a9b7 100644
+--- a/lib/api-client-react/src/generated/api.schemas.ts
++++ b/lib/api-client-react/src/generated/api.schemas.ts
+@@ -1,5 +1,5 @@
+ /**
+- * Generated by orval v8.23.0 🍺
++ * Generated by orval 🍺
+  * Do not edit manually.
+  * Api
+  * API specification
+@@ -29,15 +29,32 @@ export const ChartTag = {
+   未分類: '未分類',
+ } as const;
+ 
++/**
++ * DJMAX chart difficulty tier, from hardest to easiest.
++ */
++export type Tier = typeof Tier[keyof typeof Tier];
++
++
++export const Tier = {
++  SC: 'SC',
++  MX: 'MX',
++  HD: 'HD',
++  NM: 'NM',
++} as const;
++
+ export interface CatalogSong {
+   id: string;
+   title: string;
+   artist: string;
+   chart: string;
++  tier: Tier;
+   /** @nullable */
+   officialDifficulty: number | null;
+   unofficialDifficulty: number;
++  /** Official DLC pack id (e.g. "v-extension-4"). Falls back to the raw V-ARCHIVE pack code when the pack isn't in the known mapping. */
+   pack: string;
++  /** Human-readable official DLC pack name (e.g. "V EXTENSION 4"). */
++  packLabel: string;
+   chartTags: ChartTag[];
+   sourceUrl: string;
+ }
+@@ -92,6 +109,8 @@ export interface SessionCreateInput {
+   p1Owned: string[];
+   p2Owned: string[];
+   selectedPacks: string[];
++  /** Which difficulty tiers to draw songs from. Defaults to SC-only if omitted. */
++  includeTiers?: Tier[];
+ }
+ 
+ export interface SessionJoinInput {
+@@ -156,6 +175,7 @@ export interface SessionActionInput {
+   p1Owned?: string[];
+   p2Owned?: string[];
+   selectedPacks?: string[];
++  includeTiers?: Tier[];
+   selectedTag?: ChartTag;
+   songId?: string;
+ }
+@@ -223,6 +243,7 @@ export interface SessionState {
+   p1Owned: string[];
+   p2Owned: string[];
+   selectedPacks: string[];
++  includeTiers: Tier[];
+   currentRound: number;
+   rounds: SessionRound[];
+   updatedAt: string;
+diff --git a/lib/api-client-react/src/generated/api.ts b/lib/api-client-react/src/generated/api.ts
+index 5c3e766..186002e 100644
+--- a/lib/api-client-react/src/generated/api.ts
++++ b/lib/api-client-react/src/generated/api.ts
+@@ -1,5 +1,5 @@
+ /**
+- * Generated by orval v8.23.0 🍺
++ * Generated by orval 🍺
+  * Do not edit manually.
+  * Api
+  * API specification
+@@ -225,11 +225,17 @@ export const getCreateMatchSessionUrl = () => {
+  */
+ export const createMatchSession = async (sessionCreateInput: SessionCreateInput, options?: Parameters<typeof customFetch>[1]): Promise<SessionState> => {
+ 
+-  return customFetch<SessionState>(getCreateMatchSessionUrl(),
++    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
++    if (!h) return {};
++    if (h instanceof Headers) return Object.fromEntries(h.entries());
++    if (Array.isArray(h)) return Object.fromEntries(h);
++    return h;
++  };
++return customFetch<SessionState>(getCreateMatchSessionUrl(),
+   {
+     ...options,
+     method: 'POST',
+-    headers: { 'Content-Type': 'application/json', ...options?.headers },
++    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+     body: JSON.stringify(sessionCreateInput)
+   }
+ );}
+@@ -238,11 +244,13 @@ export const createMatchSession = async (sessionCreateInput: SessionCreateInput,
+ 
+ 
+ 
++export const getCreateMatchSessionMutationKey = () => ['createMatchSession'] as const;
++
+ export const getCreateMatchSessionMutationOptions = <TError = ErrorType<unknown>,
+-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createMatchSession>>, TError,{data: BodyType<SessionCreateInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+-): UseMutationOptions<Awaited<ReturnType<typeof createMatchSession>>, TError,{data: BodyType<SessionCreateInput>}, TContext> => {
++    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createMatchSession>>, TError,CreateMatchSessionMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
++): UseMutationOptions<Awaited<ReturnType<typeof createMatchSession>>, TError,CreateMatchSessionMutationVariables, TContext> => {
+ 
+-const mutationKey = ['createMatchSession'];
++const mutationKey = getCreateMatchSessionMutationKey();
+ const {mutation: mutationOptions, request: requestOptions} = options ?
+       options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+       options
+@@ -252,7 +260,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
+ 
+ 
+ 
+-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof createMatchSession>>, {data: BodyType<SessionCreateInput>}> = (props) => {
++      const mutationFn: MutationFunction<Awaited<ReturnType<typeof createMatchSession>>, CreateMatchSessionMutationVariables> = (props) => {
+           const {data} = props ?? {};
+ 
+           return  createMatchSession(data,requestOptions)
+@@ -268,16 +276,17 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
+     export type CreateMatchSessionMutationResult = NonNullable<Awaited<ReturnType<typeof createMatchSession>>>
+     export type CreateMatchSessionMutationBody = BodyType<SessionCreateInput>
+     export type CreateMatchSessionMutationError = ErrorType<unknown>
++    export type CreateMatchSessionMutationVariables = {data: BodyType<SessionCreateInput>}
+ 
+     /**
+  * @summary Create a shared match session
+  */
+ export const useCreateMatchSession = <TError = ErrorType<unknown>,
+-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createMatchSession>>, TError,{data: BodyType<SessionCreateInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
++    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createMatchSession>>, TError,CreateMatchSessionMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
+  ): UseMutationResult<
+         Awaited<ReturnType<typeof createMatchSession>>,
+         TError,
+-        {data: BodyType<SessionCreateInput>},
++        CreateMatchSessionMutationVariables,
+         TContext
+       > => {
+       return useMutation(getCreateMatchSessionMutationOptions(options));
+@@ -374,11 +383,17 @@ export const getJoinMatchSessionUrl = (key: string,) => {
+ export const joinMatchSession = async (key: string,
+     sessionJoinInput: SessionJoinInput, options?: Parameters<typeof customFetch>[1]): Promise<SessionState> => {
+ 
+-  return customFetch<SessionState>(getJoinMatchSessionUrl(key),
++    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
++    if (!h) return {};
++    if (h instanceof Headers) return Object.fromEntries(h.entries());
++    if (Array.isArray(h)) return Object.fromEntries(h);
++    return h;
++  };
++return customFetch<SessionState>(getJoinMatchSessionUrl(key),
+   {
+     ...options,
+     method: 'POST',
+-    headers: { 'Content-Type': 'application/json', ...options?.headers },
++    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+     body: JSON.stringify(sessionJoinInput)
+   }
+ );}
+@@ -387,11 +402,13 @@ export const joinMatchSession = async (key: string,
+ 
+ 
+ 
++export const getJoinMatchSessionMutationKey = () => ['joinMatchSession'] as const;
++
+ export const getJoinMatchSessionMutationOptions = <TError = ErrorType<ErrorResponse>,
+-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof joinMatchSession>>, TError,{key: string;data: BodyType<SessionJoinInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+-): UseMutationOptions<Awaited<ReturnType<typeof joinMatchSession>>, TError,{key: string;data: BodyType<SessionJoinInput>}, TContext> => {
++    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof joinMatchSession>>, TError,JoinMatchSessionMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
++): UseMutationOptions<Awaited<ReturnType<typeof joinMatchSession>>, TError,JoinMatchSessionMutationVariables, TContext> => {
+ 
+-const mutationKey = ['joinMatchSession'];
++const mutationKey = getJoinMatchSessionMutationKey();
+ const {mutation: mutationOptions, request: requestOptions} = options ?
+       options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+       options
+@@ -401,7 +418,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
+ 
+ 
+ 
+-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof joinMatchSession>>, {key: string;data: BodyType<SessionJoinInput>}> = (props) => {
++      const mutationFn: MutationFunction<Awaited<ReturnType<typeof joinMatchSession>>, JoinMatchSessionMutationVariables> = (props) => {
+           const {key,data} = props ?? {};
+ 
+           return  joinMatchSession(key,data,requestOptions)
+@@ -417,16 +434,17 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
+     export type JoinMatchSessionMutationResult = NonNullable<Awaited<ReturnType<typeof joinMatchSession>>>
+     export type JoinMatchSessionMutationBody = BodyType<SessionJoinInput>
+     export type JoinMatchSessionMutationError = ErrorType<ErrorResponse>
++    export type JoinMatchSessionMutationVariables = {key: string;data: BodyType<SessionJoinInput>}
+ 
+     /**
+  * @summary Join an existing match session
+  */
+ export const useJoinMatchSession = <TError = ErrorType<ErrorResponse>,
+-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof joinMatchSession>>, TError,{key: string;data: BodyType<SessionJoinInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
++    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof joinMatchSession>>, TError,JoinMatchSessionMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
+  ): UseMutationResult<
+         Awaited<ReturnType<typeof joinMatchSession>>,
+         TError,
+-        {key: string;data: BodyType<SessionJoinInput>},
++        JoinMatchSessionMutationVariables,
+         TContext
+       > => {
+       return useMutation(getJoinMatchSessionMutationOptions(options));
+@@ -446,11 +464,17 @@ export const getApplyMatchActionUrl = (key: string,) => {
+ export const applyMatchAction = async (key: string,
+     sessionActionInput: SessionActionInput, options?: Parameters<typeof customFetch>[1]): Promise<SessionState> => {
+ 
+-  return customFetch<SessionState>(getApplyMatchActionUrl(key),
++    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
++    if (!h) return {};
++    if (h instanceof Headers) return Object.fromEntries(h.entries());
++    if (Array.isArray(h)) return Object.fromEntries(h);
++    return h;
++  };
++return customFetch<SessionState>(getApplyMatchActionUrl(key),
+   {
+     ...options,
+     method: 'POST',
+-    headers: { 'Content-Type': 'application/json', ...options?.headers },
++    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+     body: JSON.stringify(sessionActionInput)
+   }
+ );}
+@@ -459,11 +483,13 @@ export const applyMatchAction = async (key: string,
+ 
+ 
+ 
++export const getApplyMatchActionMutationKey = () => ['applyMatchAction'] as const;
++
+ export const getApplyMatchActionMutationOptions = <TError = ErrorType<ErrorResponse>,
+-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof applyMatchAction>>, TError,{key: string;data: BodyType<SessionActionInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+-): UseMutationOptions<Awaited<ReturnType<typeof applyMatchAction>>, TError,{key: string;data: BodyType<SessionActionInput>}, TContext> => {
++    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof applyMatchAction>>, TError,ApplyMatchActionMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
++): UseMutationOptions<Awaited<ReturnType<typeof applyMatchAction>>, TError,ApplyMatchActionMutationVariables, TContext> => {
+ 
+-const mutationKey = ['applyMatchAction'];
++const mutationKey = getApplyMatchActionMutationKey();
+ const {mutation: mutationOptions, request: requestOptions} = options ?
+       options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+       options
+@@ -473,7 +499,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
+ 
+ 
+ 
+-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof applyMatchAction>>, {key: string;data: BodyType<SessionActionInput>}> = (props) => {
++      const mutationFn: MutationFunction<Awaited<ReturnType<typeof applyMatchAction>>, ApplyMatchActionMutationVariables> = (props) => {
+           const {key,data} = props ?? {};
+ 
+           return  applyMatchAction(key,data,requestOptions)
+@@ -489,16 +515,17 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
+     export type ApplyMatchActionMutationResult = NonNullable<Awaited<ReturnType<typeof applyMatchAction>>>
+     export type ApplyMatchActionMutationBody = BodyType<SessionActionInput>
+     export type ApplyMatchActionMutationError = ErrorType<ErrorResponse>
++    export type ApplyMatchActionMutationVariables = {key: string;data: BodyType<SessionActionInput>}
+ 
+     /**
+  * @summary Apply a validated action to a shared match session
+  */
+ export const useApplyMatchAction = <TError = ErrorType<ErrorResponse>,
+-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof applyMatchAction>>, TError,{key: string;data: BodyType<SessionActionInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
++    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof applyMatchAction>>, TError,ApplyMatchActionMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
+  ): UseMutationResult<
+         Awaited<ReturnType<typeof applyMatchAction>>,
+         TError,
+-        {key: string;data: BodyType<SessionActionInput>},
++        ApplyMatchActionMutationVariables,
+         TContext
+       > => {
+       return useMutation(getApplyMatchActionMutationOptions(options));
+diff --git a/lib/api-spec/openapi.yaml b/lib/api-spec/openapi.yaml
+index 5bb1a60..71d61c0 100644
+--- a/lib/api-spec/openapi.yaml
++++ b/lib/api-spec/openapi.yaml
+@@ -189,6 +189,14 @@ components:
+         - 高速
+         - 混合
+         - 未分類
++    Tier:
++      type: string
++      description: DJMAX chart difficulty tier, from hardest to easiest.
++      enum:
++        - SC
++        - MX
++        - HD
++        - NM
+     CatalogSong:
+       type: object
+       properties:
+@@ -200,19 +208,25 @@ components:
+           type: string
+         chart:
+           type: string
++        tier:
++          $ref: "#/components/schemas/Tier"
+         officialDifficulty:
+           type: ["number", "null"]
+         unofficialDifficulty:
+           type: number
+         pack:
+           type: string
++          description: Official DLC pack id (e.g. "v-extension-4"). Falls back to the raw V-ARCHIVE pack code when the pack isn't in the known mapping.
++        packLabel:
++          type: string
++          description: Human-readable official DLC pack name (e.g. "V EXTENSION 4").
+         chartTags:
+           type: array
+           items:
+             $ref: "#/components/schemas/ChartTag"
+         sourceUrl:
+           type: string
+-      required: [id, title, artist, chart, officialDifficulty, unofficialDifficulty, pack, chartTags, sourceUrl]
++      required: [id, title, artist, chart, tier, officialDifficulty, unofficialDifficulty, pack, packLabel, chartTags, sourceUrl]
+     CatalogResponse:
+       type: object
+       properties:
+@@ -259,6 +273,11 @@ components:
+         selectedPacks:
+           type: array
+           items: { type: string }
++        includeTiers:
++          type: array
++          description: Which difficulty tiers to draw songs from. Defaults to SC-only if omitted.
++          items:
++            $ref: "#/components/schemas/Tier"
+       required: [playerName, button, centerDifficulty, lowerOffset, upperOffset, p1Owned, p2Owned, selectedPacks]
+     SessionJoinInput:
+       type: object
+@@ -309,6 +328,10 @@ components:
+         selectedPacks:
+           type: array
+           items: { type: string }
++        includeTiers:
++          type: array
++          items:
++            $ref: "#/components/schemas/Tier"
+         selectedTag:
+           $ref: "#/components/schemas/ChartTag"
+         songId:
+@@ -381,6 +404,10 @@ components:
+         selectedPacks:
+           type: array
+           items: { type: string }
++        includeTiers:
++          type: array
++          items:
++            $ref: "#/components/schemas/Tier"
+         currentRound:
+           type: number
+         rounds:
+@@ -389,5 +416,5 @@ components:
+             $ref: "#/components/schemas/SessionRound"
+         updatedAt:
+           type: string
+-      required: [key, clientToken, role, status, p1, p2, button, centerDifficulty, lowerOffset, upperOffset, p1Owned, p2Owned, selectedPacks, currentRound, rounds, updatedAt]
++      required: [key, clientToken, role, status, p1, p2, button, centerDifficulty, lowerOffset, upperOffset, p1Owned, p2Owned, selectedPacks, includeTiers, currentRound, rounds, updatedAt]
+ 
+diff --git a/lib/api-zod/src/generated/api.ts b/lib/api-zod/src/generated/api.ts
+index 3c3cca1..f85affc 100644
+--- a/lib/api-zod/src/generated/api.ts
++++ b/lib/api-zod/src/generated/api.ts
+@@ -1,5 +1,5 @@
+ /**
+- * Generated by orval v8.23.0 🍺
++ * Generated by orval 🍺
+  * Do not edit manually.
+  * Api
+  * API specification
+@@ -31,9 +31,11 @@ export const GetDifficultyCatalogResponse = zod.object({
+   "title": zod.string(),
+   "artist": zod.string(),
+   "chart": zod.string(),
++  "tier": zod.enum(['SC', 'MX', 'HD', 'NM']).describe('DJMAX chart difficulty tier, from hardest to easiest.'),
+   "officialDifficulty": zod.number().nullable(),
+   "unofficialDifficulty": zod.number(),
+-  "pack": zod.string(),
++  "pack": zod.string().describe('Official DLC pack id (e.g. \"v-extension-4\"). Falls back to the raw V-ARCHIVE pack code when the pack isn\'t in the known mapping.'),
++  "packLabel": zod.string().describe('Human-readable official DLC pack name (e.g. \"V EXTENSION 4\").'),
+   "chartTags": zod.array(zod.enum(['物量', 'ハネリズム', '階段', '乱打', 'トリル', '同時押し', '低速', '高速', '混合', '未分類'])),
+   "sourceUrl": zod.string()
+ })),
+@@ -66,7 +68,8 @@ export const CreateMatchSessionBody = zod.object({
+   "upperOffset": zod.number().min(createMatchSessionBodyUpperOffsetMin).max(createMatchSessionBodyUpperOffsetMax),
+   "p1Owned": zod.array(zod.string()),
+   "p2Owned": zod.array(zod.string()),
+-  "selectedPacks": zod.array(zod.string())
++  "selectedPacks": zod.array(zod.string()),
++  "includeTiers": zod.array(zod.enum(['SC', 'MX', 'HD', 'NM']).describe('DJMAX chart difficulty tier, from hardest to easiest.')).optional().describe('Which difficulty tiers to draw songs from. Defaults to SC-only if omitted.')
+ })
+ 
+ export const CreateMatchSessionResponse = zod.object({
+@@ -83,6 +86,7 @@ export const CreateMatchSessionResponse = zod.object({
+   "p1Owned": zod.array(zod.string()),
+   "p2Owned": zod.array(zod.string()),
+   "selectedPacks": zod.array(zod.string()),
++  "includeTiers": zod.array(zod.enum(['SC', 'MX', 'HD', 'NM']).describe('DJMAX chart difficulty tier, from hardest to easiest.')),
+   "currentRound": zod.number(),
+   "rounds": zod.array(zod.object({
+   "label": zod.string(),
+@@ -129,6 +133,7 @@ export const GetMatchSessionResponse = zod.object({
+   "p1Owned": zod.array(zod.string()),
+   "p2Owned": zod.array(zod.string()),
+   "selectedPacks": zod.array(zod.string()),
++  "includeTiers": zod.array(zod.enum(['SC', 'MX', 'HD', 'NM']).describe('DJMAX chart difficulty tier, from hardest to easiest.')),
+   "currentRound": zod.number(),
+   "rounds": zod.array(zod.object({
+   "label": zod.string(),
+@@ -183,6 +188,7 @@ export const JoinMatchSessionResponse = zod.object({
+   "p1Owned": zod.array(zod.string()),
+   "p2Owned": zod.array(zod.string()),
+   "selectedPacks": zod.array(zod.string()),
++  "includeTiers": zod.array(zod.enum(['SC', 'MX', 'HD', 'NM']).describe('DJMAX chart difficulty tier, from hardest to easiest.')),
+   "currentRound": zod.number(),
+   "rounds": zod.array(zod.object({
+   "label": zod.string(),
+@@ -235,6 +241,7 @@ export const ApplyMatchActionBody = zod.object({
+   "p1Owned": zod.array(zod.string()).optional(),
+   "p2Owned": zod.array(zod.string()).optional(),
+   "selectedPacks": zod.array(zod.string()).optional(),
++  "includeTiers": zod.array(zod.enum(['SC', 'MX', 'HD', 'NM']).describe('DJMAX chart difficulty tier, from hardest to easiest.')).optional(),
+   "selectedTag": zod.enum(['物量', 'ハネリズム', '階段', '乱打', 'トリル', '同時押し', '低速', '高速', '混合', '未分類']).optional(),
+   "songId": zod.string().optional()
+ })
+@@ -253,6 +260,7 @@ export const ApplyMatchActionResponse = zod.object({
+   "p1Owned": zod.array(zod.string()),
+   "p2Owned": zod.array(zod.string()),
+   "selectedPacks": zod.array(zod.string()),
++  "includeTiers": zod.array(zod.enum(['SC', 'MX', 'HD', 'NM']).describe('DJMAX chart difficulty tier, from hardest to easiest.')),
+   "currentRound": zod.number(),
+   "rounds": zod.array(zod.object({
+   "label": zod.string(),
+diff --git a/lib/api-zod/src/generated/types/catalogResponse.ts b/lib/api-zod/src/generated/types/catalogResponse.ts
+index e34957c..58f1f80 100644
+--- a/lib/api-zod/src/generated/types/catalogResponse.ts
++++ b/lib/api-zod/src/generated/types/catalogResponse.ts
+@@ -1,5 +1,5 @@
+ /**
+- * Generated by orval v8.23.0 🍺
++ * Generated by orval 🍺
+  * Do not edit manually.
+  * Api
+  * API specification
+diff --git a/lib/api-zod/src/generated/types/catalogResponseSource.ts b/lib/api-zod/src/generated/types/catalogResponseSource.ts
+index d326859..9e01c46 100644
+--- a/lib/api-zod/src/generated/types/catalogResponseSource.ts
++++ b/lib/api-zod/src/generated/types/catalogResponseSource.ts
+@@ -1,5 +1,5 @@
+ /**
+- * Generated by orval v8.23.0 🍺
++ * Generated by orval 🍺
+  * Do not edit manually.
+  * Api
+  * API specification
+diff --git a/lib/api-zod/src/generated/types/catalogSong.ts b/lib/api-zod/src/generated/types/catalogSong.ts
+index 1732280..798fe96 100644
+--- a/lib/api-zod/src/generated/types/catalogSong.ts
++++ b/lib/api-zod/src/generated/types/catalogSong.ts
+@@ -1,21 +1,26 @@
+ /**
+- * Generated by orval v8.23.0 🍺
++ * Generated by orval 🍺
+  * Do not edit manually.
+  * Api
+  * API specification
+  * OpenAPI spec version: 0.1.0
+  */
+ import type { ChartTag } from './chartTag';
++import type { Tier } from './tier';
+ 
+ export interface CatalogSong {
+   id: string;
+   title: string;
+   artist: string;
+   chart: string;
++  tier: Tier;
+   /** @nullable */
+   officialDifficulty: number | null;
+   unofficialDifficulty: number;
++  /** Official DLC pack id (e.g. "v-extension-4"). Falls back to the raw V-ARCHIVE pack code when the pack isn't in the known mapping. */
+   pack: string;
++  /** Human-readable official DLC pack name (e.g. "V EXTENSION 4"). */
++  packLabel: string;
+   chartTags: ChartTag[];
+   sourceUrl: string;
+ }
+diff --git a/lib/api-zod/src/generated/types/chartTag.ts b/lib/api-zod/src/generated/types/chartTag.ts
+index 8d66865..43be0ce 100644
+--- a/lib/api-zod/src/generated/types/chartTag.ts
++++ b/lib/api-zod/src/generated/types/chartTag.ts
+@@ -1,5 +1,5 @@
+ /**
+- * Generated by orval v8.23.0 🍺
++ * Generated by orval 🍺
+  * Do not edit manually.
+  * Api
+  * API specification
+diff --git a/lib/api-zod/src/generated/types/errorResponse.ts b/lib/api-zod/src/generated/types/errorResponse.ts
+index 2da3e74..ba02eab 100644
+--- a/lib/api-zod/src/generated/types/errorResponse.ts
++++ b/lib/api-zod/src/generated/types/errorResponse.ts
+@@ -1,5 +1,5 @@
+ /**
+- * Generated by orval v8.23.0 🍺
++ * Generated by orval 🍺
+  * Do not edit manually.
+  * Api
+  * API specification
+diff --git a/lib/api-zod/src/generated/types/healthStatus.ts b/lib/api-zod/src/generated/types/healthStatus.ts
+index 8445762..202c01e 100644
+--- a/lib/api-zod/src/generated/types/healthStatus.ts
++++ b/lib/api-zod/src/generated/types/healthStatus.ts
+@@ -1,5 +1,5 @@
+ /**
+- * Generated by orval v8.23.0 🍺
++ * Generated by orval 🍺
+  * Do not edit manually.
+  * Api
+  * API specification
+diff --git a/lib/api-zod/src/generated/types/index.ts b/lib/api-zod/src/generated/types/index.ts
+index 4e9ec62..c252154 100644
+--- a/lib/api-zod/src/generated/types/index.ts
++++ b/lib/api-zod/src/generated/types/index.ts
+@@ -1,5 +1,5 @@
+ /**
+- * Generated by orval v8.23.0 🍺
++ * Generated by orval 🍺
+  * Do not edit manually.
+  * Api
+  * API specification
+@@ -24,3 +24,4 @@ export * from './sessionRoundStrategyOutcome';
+ export * from './sessionState';
+ export * from './sessionStateRole';
+ export * from './sessionStateStatus';
++export * from './tier';
+diff --git a/lib/api-zod/src/generated/types/sessionActionInput.ts b/lib/api-zod/src/generated/types/sessionActionInput.ts
+index 228d0f0..370a0ce 100644
+--- a/lib/api-zod/src/generated/types/sessionActionInput.ts
++++ b/lib/api-zod/src/generated/types/sessionActionInput.ts
+@@ -1,5 +1,5 @@
+ /**
+- * Generated by orval v8.23.0 🍺
++ * Generated by orval 🍺
+  * Do not edit manually.
+  * Api
+  * API specification
+@@ -9,6 +9,7 @@ import type { ChartTag } from './chartTag';
+ import type { SessionActionInputAction } from './sessionActionInputAction';
+ import type { SessionActionInputButton } from './sessionActionInputButton';
+ import type { SessionActionInputPlayer } from './sessionActionInputPlayer';
++import type { Tier } from './tier';
+ 
+ export interface SessionActionInput {
+   action: SessionActionInputAction;
+@@ -32,6 +33,7 @@ export interface SessionActionInput {
+   p1Owned?: string[];
+   p2Owned?: string[];
+   selectedPacks?: string[];
++  includeTiers?: Tier[];
+   selectedTag?: ChartTag;
+   songId?: string;
+ }
+diff --git a/lib/api-zod/src/generated/types/sessionActionInputAction.ts b/lib/api-zod/src/generated/types/sessionActionInputAction.ts
+index f1e7e1a..2d524b4 100644
+--- a/lib/api-zod/src/generated/types/sessionActionInputAction.ts
++++ b/lib/api-zod/src/generated/types/sessionActionInputAction.ts
+@@ -1,5 +1,5 @@
+ /**
+- * Generated by orval v8.23.0 🍺
++ * Generated by orval 🍺
+  * Do not edit manually.
+  * Api
+  * API specification
+diff --git a/lib/api-zod/src/generated/types/sessionActionInputButton.ts b/lib/api-zod/src/generated/types/sessionActionInputButton.ts
+index 76ef409..7f053a4 100644
+--- a/lib/api-zod/src/generated/types/sessionActionInputButton.ts
++++ b/lib/api-zod/src/generated/types/sessionActionInputButton.ts
+@@ -1,5 +1,5 @@
+ /**
+- * Generated by orval v8.23.0 🍺
++ * Generated by orval 🍺
+  * Do not edit manually.
+  * Api
+  * API specification
+diff --git a/lib/api-zod/src/generated/types/sessionActionInputPlayer.ts b/lib/api-zod/src/generated/types/sessionActionInputPlayer.ts
+index eb30865..bc8d2db 100644
+--- a/lib/api-zod/src/generated/types/sessionActionInputPlayer.ts
++++ b/lib/api-zod/src/generated/types/sessionActionInputPlayer.ts
+@@ -1,5 +1,5 @@
+ /**
+- * Generated by orval v8.23.0 🍺
++ * Generated by orval 🍺
+  * Do not edit manually.
+  * Api
+  * API specification
+diff --git a/lib/api-zod/src/generated/types/sessionCreateInput.ts b/lib/api-zod/src/generated/types/sessionCreateInput.ts
+index 2a2db7c..a30063b 100644
+--- a/lib/api-zod/src/generated/types/sessionCreateInput.ts
++++ b/lib/api-zod/src/generated/types/sessionCreateInput.ts
+@@ -1,11 +1,12 @@
+ /**
+- * Generated by orval v8.23.0 🍺
++ * Generated by orval 🍺
+  * Do not edit manually.
+  * Api
+  * API specification
+  * OpenAPI spec version: 0.1.0
+  */
+ import type { SessionCreateInputButton } from './sessionCreateInputButton';
++import type { Tier } from './tier';
+ 
+ export interface SessionCreateInput {
+   /**
+@@ -32,4 +33,6 @@ export interface SessionCreateInput {
+   p1Owned: string[];
+   p2Owned: string[];
+   selectedPacks: string[];
++  /** Which difficulty tiers to draw songs from. Defaults to SC-only if omitted. */
++  includeTiers?: Tier[];
+ }
+diff --git a/lib/api-zod/src/generated/types/sessionCreateInputButton.ts b/lib/api-zod/src/generated/types/sessionCreateInputButton.ts
+index f1576b5..367c3ce 100644
+--- a/lib/api-zod/src/generated/types/sessionCreateInputButton.ts
++++ b/lib/api-zod/src/generated/types/sessionCreateInputButton.ts
+@@ -1,5 +1,5 @@
+ /**
+- * Generated by orval v8.23.0 🍺
++ * Generated by orval 🍺
+  * Do not edit manually.
+  * Api
+  * API specification
+diff --git a/lib/api-zod/src/generated/types/sessionJoinInput.ts b/lib/api-zod/src/generated/types/sessionJoinInput.ts
+index 88d4ab0..fad14a8 100644
+--- a/lib/api-zod/src/generated/types/sessionJoinInput.ts
++++ b/lib/api-zod/src/generated/types/sessionJoinInput.ts
+@@ -1,5 +1,5 @@
+ /**
+- * Generated by orval v8.23.0 🍺
++ * Generated by orval 🍺
+  * Do not edit manually.
+  * Api
+  * API specification
+diff --git a/lib/api-zod/src/generated/types/sessionRound.ts b/lib/api-zod/src/generated/types/sessionRound.ts
+index f35dca5..6bd0a71 100644
+--- a/lib/api-zod/src/generated/types/sessionRound.ts
++++ b/lib/api-zod/src/generated/types/sessionRound.ts
+@@ -1,5 +1,5 @@
+ /**
+- * Generated by orval v8.23.0 🍺
++ * Generated by orval 🍺
+  * Do not edit manually.
+  * Api
+  * API specification
+diff --git a/lib/api-zod/src/generated/types/sessionRoundStrategyOutcome.ts b/lib/api-zod/src/generated/types/sessionRoundStrategyOutcome.ts
+index a227480..de9b31b 100644
+--- a/lib/api-zod/src/generated/types/sessionRoundStrategyOutcome.ts
++++ b/lib/api-zod/src/generated/types/sessionRoundStrategyOutcome.ts
+@@ -1,5 +1,5 @@
+ /**
+- * Generated by orval v8.23.0 🍺
++ * Generated by orval 🍺
+  * Do not edit manually.
+  * Api
+  * API specification
+diff --git a/lib/api-zod/src/generated/types/sessionState.ts b/lib/api-zod/src/generated/types/sessionState.ts
+index 57377e9..d1323af 100644
+--- a/lib/api-zod/src/generated/types/sessionState.ts
++++ b/lib/api-zod/src/generated/types/sessionState.ts
+@@ -1,5 +1,5 @@
+ /**
+- * Generated by orval v8.23.0 🍺
++ * Generated by orval 🍺
+  * Do not edit manually.
+  * Api
+  * API specification
+@@ -8,6 +8,7 @@
+ import type { SessionRound } from './sessionRound';
+ import type { SessionStateRole } from './sessionStateRole';
+ import type { SessionStateStatus } from './sessionStateStatus';
++import type { Tier } from './tier';
+ 
+ export interface SessionState {
+   key: string;
+@@ -24,6 +25,7 @@ export interface SessionState {
+   p1Owned: string[];
+   p2Owned: string[];
+   selectedPacks: string[];
++  includeTiers: Tier[];
+   currentRound: number;
+   rounds: SessionRound[];
+   updatedAt: string;
+diff --git a/lib/api-zod/src/generated/types/sessionStateRole.ts b/lib/api-zod/src/generated/types/sessionStateRole.ts
+index c23a332..f911515 100644
+--- a/lib/api-zod/src/generated/types/sessionStateRole.ts
++++ b/lib/api-zod/src/generated/types/sessionStateRole.ts
+@@ -1,5 +1,5 @@
+ /**
+- * Generated by orval v8.23.0 🍺
++ * Generated by orval 🍺
+  * Do not edit manually.
+  * Api
+  * API specification
+diff --git a/lib/api-zod/src/generated/types/sessionStateStatus.ts b/lib/api-zod/src/generated/types/sessionStateStatus.ts
+index 2fb0ccf..0f2ebc8 100644
+--- a/lib/api-zod/src/generated/types/sessionStateStatus.ts
++++ b/lib/api-zod/src/generated/types/sessionStateStatus.ts
+@@ -1,5 +1,5 @@
+ /**
+- * Generated by orval v8.23.0 🍺
++ * Generated by orval 🍺
+  * Do not edit manually.
+  * Api
+  * API specification
+diff --git a/lib/api-zod/src/generated/types/tier.ts b/lib/api-zod/src/generated/types/tier.ts
+new file mode 100644
+index 0000000..27dccbb
+--- /dev/null
++++ b/lib/api-zod/src/generated/types/tier.ts
+@@ -0,0 +1,20 @@
++/**
++ * Generated by orval 🍺
++ * Do not edit manually.
++ * Api
++ * API specification
++ * OpenAPI spec version: 0.1.0
++ */
++
++/**
++ * DJMAX chart difficulty tier, from hardest to easiest.
++ */
++export type Tier = typeof Tier[keyof typeof Tier];
++
++
++export const Tier = {
++  SC: 'SC',
++  MX: 'MX',
++  HD: 'HD',
++  NM: 'NM',
++} as const;
