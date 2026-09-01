@@ -1,0 +1,1 @@
+- [Online match synchronization](online-match-session.md) — session keys use server-persisted state and polling; browser-only storage cannot support two-player matches.

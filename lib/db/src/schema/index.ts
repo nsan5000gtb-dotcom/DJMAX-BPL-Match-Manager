@@ -17,4 +17,13 @@
 //   export type InsertPost = z.infer<typeof insertPostSchema>;
 //   export type Post = typeof postsTable.$inferSelect;
 
-export {}
+import { jsonb, pgTable, text, timestamp } from "drizzle-orm/pg-core";
+
+export const matchSessionsTable = pgTable("match_sessions", {
+  sessionKey: text("session_key").primaryKey(),
+  state: jsonb("state").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export type MatchSession = typeof matchSessionsTable.$inferSelect;

@@ -10,6 +10,10 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: matches
+    description: Shared DJMAX match sessions
+  - name: catalog
+    description: External difficulty catalog
 paths:
   /healthz:
     get:
@@ -24,6 +28,139 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /catalog/{button}:
+    get:
+      operationId: getDifficultyCatalog
+      tags: [catalog]
+      summary: Get an unofficial DJMAX difficulty catalog
+      description: Returns V-ARCHIVE MAX DJ POWER data for a button mode, with a documented fallback catalog if the source is unavailable.
+      parameters:
+        - name: button
+          in: path
+          required: true
+          schema:
+            type: number
+            enum: [4, 5, 6, 8]
+      responses:
+        "200":
+          description: Difficulty catalog
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogResponse"
+  /sessions:
+    post:
+      operationId: createMatchSession
+      tags: [matches]
+      summary: Create a shared match session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionCreateInput"
+      responses:
+        "201":
+          description: Created match session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionState"
+  /sessions/{key}:
+    get:
+      operationId: getMatchSession
+      tags: [matches]
+      summary: Read a shared match session
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 6
+            maxLength: 8
+      responses:
+        "200":
+          description: Match session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionState"
+        "404":
+          description: Session not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      operationId: joinMatchSession
+      tags: [matches]
+      summary: Join an existing match session
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 6
+            maxLength: 8
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionJoinInput"
+      responses:
+        "200":
+          description: Joined match session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionState"
+        "404":
+          description: Session not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /sessions/{key}/actions:
+    post:
+      operationId: applyMatchAction
+      tags: [matches]
+      summary: Apply a validated action to a shared match session
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 6
+            maxLength: 8
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionActionInput"
+      responses:
+        "200":
+          description: Updated match session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionState"
+        "400":
+          description: Invalid action
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Session not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 components:
   schemas:
     HealthStatus:
@@ -33,4 +170,215 @@ components:
           type: string
       required:
         - status
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required: [error]
+    ChartTag:
+      type: string
+      enum:
+        - 物量
+        - ハネリズム
+        - 階段
+        - 乱打
+        - トリル
+        - 同時押し
+        - 低速
+        - 高速
+        - 混合
+        - 未分類
+    CatalogSong:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        artist:
+          type: string
+        chart:
+          type: string
+        officialDifficulty:
+          type: ["number", "null"]
+        unofficialDifficulty:
+          type: number
+        pack:
+          type: string
+        chartTags:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChartTag"
+        sourceUrl:
+          type: string
+      required: [id, title, artist, chart, officialDifficulty, unofficialDifficulty, pack, chartTags, sourceUrl]
+    CatalogResponse:
+      type: object
+      properties:
+        songs:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogSong"
+        source:
+          type: string
+          enum: [v-archive, fallback]
+        sourceUrl:
+          type: string
+        fetchedAt:
+          type: string
+      required: [songs, source, sourceUrl, fetchedAt]
+    SessionCreateInput:
+      type: object
+      properties:
+        playerName:
+          type: string
+          minLength: 1
+          maxLength: 18
+        button:
+          type: number
+          enum: [4, 5, 6, 8]
+        centerDifficulty:
+          type: number
+          minimum: 1
+          maximum: 20
+        lowerOffset:
+          type: number
+          minimum: 0
+          maximum: 5
+        upperOffset:
+          type: number
+          minimum: 0
+          maximum: 5
+        p1Owned:
+          type: array
+          items: { type: string }
+        p2Owned:
+          type: array
+          items: { type: string }
+        selectedPacks:
+          type: array
+          items: { type: string }
+      required: [playerName, button, centerDifficulty, lowerOffset, upperOffset, p1Owned, p2Owned, selectedPacks]
+    SessionJoinInput:
+      type: object
+      properties:
+        playerName:
+          type: string
+          minLength: 1
+          maxLength: 18
+      required: [playerName]
+    SessionActionInput:
+      type: object
+      properties:
+        action:
+          type: string
+          enum:
+            - set-setup
+            - start-match
+            - draw-chart-tag
+            - use-strategy
+            - resolve-strategy
+            - pick-song
+            - advance-round
+            - reset-match
+        player:
+          type: string
+          enum: [p1, p2]
+        button:
+          type: number
+          enum: [4, 5, 6, 8]
+        centerDifficulty:
+          type: number
+          minimum: 1
+          maximum: 20
+        lowerOffset:
+          type: number
+          minimum: 0
+          maximum: 5
+        upperOffset:
+          type: number
+          minimum: 0
+          maximum: 5
+        p1Owned:
+          type: array
+          items: { type: string }
+        p2Owned:
+          type: array
+          items: { type: string }
+        selectedPacks:
+          type: array
+          items: { type: string }
+        selectedTag:
+          $ref: "#/components/schemas/ChartTag"
+        songId:
+          type: string
+      required: [action]
+    SessionRound:
+      type: object
+      properties:
+        label:
+          type: string
+        lower:
+          type: number
+        upper:
+          type: number
+        tag:
+          allOf:
+            - $ref: "#/components/schemas/ChartTag"
+          nullable: true
+        p1Card:
+          type: boolean
+        p2Card:
+          type: boolean
+        resolved:
+          type: boolean
+        pickedSongId:
+          type: ["string", "null"]
+        pickedSongTitle:
+          type: ["string", "null"]
+      required: [label, lower, upper, tag, p1Card, p2Card, resolved, pickedSongId, pickedSongTitle]
+    SessionState:
+      type: object
+      properties:
+        key:
+          type: string
+        clientToken:
+          type: string
+        role:
+          type: string
+          enum: [host, guest, full]
+        status:
+          type: string
+          enum: [waiting, setup, active, finished]
+        p1:
+          type: string
+        p2:
+          type: ["string", "null"]
+        button:
+          type: number
+        centerDifficulty:
+          type: number
+        lowerOffset:
+          type: number
+        upperOffset:
+          type: number
+        p1Owned:
+          type: array
+          items: { type: string }
+        p2Owned:
+          type: array
+          items: { type: string }
+        selectedPacks:
+          type: array
+          items: { type: string }
+        currentRound:
+          type: number
+        rounds:
+          type: array
+          items:
+            $ref: "#/components/schemas/SessionRound"
+        updatedAt:
+          type: string
+      required: [key, clientToken, role, status, p1, p2, button, centerDifficulty, lowerOffset, upperOffset, p1Owned, p2Owned, selectedPacks, currentRound, rounds, updatedAt]
 
